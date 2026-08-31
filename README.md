@@ -1,6 +1,6 @@
 # 蓝汐音乐 (lxm-tui)
 
-OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。本项目由AI制作，是写给我自己用的一个本地终端音乐播放器。
+OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm.py` 移植而来，全新 UI ✨
 
 ## 特性
 
@@ -12,7 +12,8 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。本项目由AI制�
 - ♥ 收藏夹 + 只看收藏模式（`f` / `F`）
 - 🎨 四种 Catppuccin 主题: Latte 拿铁 / Frappé 冰沙 / Macchiato 玛奇朵 / Mocha 摩卡 (`t` 循环切换, 自动保存)
 - 💾 断点续播：退出记住歌曲与位置，重开自动续播
-- 🎚 切歌淡入淡出（渐弱 → 渐强）
+  - 🎚 切歌淡入淡出（渐弱 → 渐强）
+  - 🔇 静音切换（M 或 0）· 进度条鼠标点击/拖动定位
 - 🐱 Catppuccin Latte 配色 + 渐变进度条 + 伪频谱等化器
 - 🖱 鼠标点击播放列表行直接播放
 
@@ -28,7 +29,7 @@ bun index.ts config                # 查看当前配置
 bun index.ts config --music-directory /path/to/music   # 设置音乐目录
 ```
 
-配置保存在 `~/.config/lxmusic/config.toml`
+配置保存在 `~/.config/lxmusic/config.toml`（与 Python 版兼容，可混用）。
 
 ## 快捷键
 
@@ -37,7 +38,8 @@ bun index.ts config --music-directory /path/to/music   # 设置音乐目录
 | 空格 / Enter | 播放 / 暂停 / 播放选中 | n / p | 下一首 / 上一首 |
 | ← / → | 快退 / 快进 5 秒 | [ / ] | 快退 / 快进 10 秒 |
 | r / a | 减速 / 加速 (0.25x~4x) | + / - | 音量增 / 减 |
-| ↑↓ / jk | 选择曲目 | s | 随机播放开关 |
+  | m | 循环模式切换 | t | 切换主题 (Latte→Frappé→Macchiato→Mocha) |
+  | M / 0 | 静音切换 |  |  |
 | m | 循环模式切换 | / | 搜索 (Enter 确认, Esc 取消) |
 | l / L | 歌词开关 / 全屏歌词 | f / F | 收藏 / 只看收藏 |
 | d | 重新扫描目录 | h | 帮助 (任意键关闭) |

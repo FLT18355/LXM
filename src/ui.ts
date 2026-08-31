@@ -13,6 +13,7 @@ import {
   TextAttributes,
   type CliRenderer,
   type KeyEvent,
+  type MouseEvent,
 } from "@opentui/core"
 import { Player, REPEAT_CYCLE } from "./player"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
@@ -175,6 +176,8 @@ export class PlayerUI {
     this.timeBox = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1 })
     this.progressText = new TextRenderable(r, { content: "", selectable: false, flexGrow: 1 })
     this.timeBox.add(this.progressText)
+    this.timeBox.onMouseDown = (ev) => this.seekFromMouse(ev)
+    this.timeBox.onMouseDrag = (ev) => this.seekFromMouse(ev)
     this.timeText = new TextRenderable(r, { content: "00:00 / 00:00  0%", fg: this.theme.subtext, selectable: false })
     this.timeBox.add(this.timeText)
     this.nowPlayBox.add(this.timeBox)
@@ -245,7 +248,7 @@ export class PlayerUI {
       backgroundColor: this.theme.mantle,
     })
     this.statusLeft = new TextRenderable(r, {
-      content: "空格 播放/暂停 · n/p 切歌 · / 搜索 · h 帮助 · q 退出",
+      content: "空格 播放/暂停 · n/p 切歌 · / 搜索 · M 静音 · h 帮助 · q 退出",
       fg: this.theme.subtext,
       selectable: false,
       wrapMode: "none",
@@ -301,7 +304,7 @@ export class PlayerUI {
       ["随机与循环", "s 随机播放开关 · m 循环模式(不循环→列表→单曲)"],
       ["歌词与全屏", "l 歌词显示开关 · L 全屏 KTV 歌词"],
       ["收藏与模式", "f 收藏当前歌曲 · F 收藏模式"],
-      ["倍速与音量", "r 减速(0.25x步长) · a 加速 · + 增音量 · - 减音量"],
+      ["倍速与音量", "r 减速(0.25x步长) · a 加速 · + 增音量 · - 减音量 · M/0 静音"],
       ["搜索与重扫", "/ 搜索(支持中文) · Enter 确认 · Esc 取消 · d 重新扫描目录"],
       ["主题与帮助", "t 切换 Catppuccin 四口味(Latte/Frappé/Macchiato/Mocha) · h 帮助"],
       ["退出", "q / Esc 退出播放器"],
@@ -557,6 +560,9 @@ export class PlayerUI {
       case seq === "d":
         this.refreshDir()
         break
+      case seq === "M" || seq === "0":
+        p.toggleMute().then(() => this.flash(p.muted ? "🔇 已静音喵~" : `音量 ${p.volume} 喵~`))
+        break
       case seq === "t":
         this.cycleTheme()
         break
@@ -611,6 +617,19 @@ export class PlayerUI {
   seek(sec: number) {
     this.p.seek(sec)
     this.flash(sec > 0 ? `快进 ${sec} 秒喵~` : `快退 ${-sec} 秒喵~`)
+  }
+
+  /** 进度条点击/拖动定位: 把鼠标 x 映射到时间 */
+  private seekFromMouse(ev: MouseEvent) {
+    const p = this.p
+    if (!p.playing || p.duration <= 0) return
+    const barX = this.progressText.screenX
+    const barW = this.progressText.width
+    if (typeof barW !== "number" || barW <= 0) return
+    const localX = Math.max(0, Math.min(barW, ev.x - barX))
+    const target = (localX / barW) * p.duration
+    p.seekTo(target)
+    this.flash(`跳转到 ${fmt(target)} 喵~`)
   }
 
   favCurrent() {
@@ -922,8 +941,9 @@ export class PlayerUI {
       this.searchActive ? "🔍 搜索" :
       p.favMode ? "♥ 收藏" : "🎵 列表"
     this.headModeText.content = ` ${mode} `
+    const volStr = p.muted ? "🔇 静音" : `音量 ${p.volume}`
     this.headRightText.content =
-      ` ${REPEAT_LABEL[p.repeat]} ┊ 音量 ${p.volume}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `
+      ` ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `
 
     // 正在播放 + 进度条
     this.updateNowPlaying()
@@ -945,7 +965,7 @@ export class PlayerUI {
         this.statusLeft.fg = this.theme.pink
       } else {
         this.statusLeft.content =
-          "空格 播放/暂停 · n/p 切歌 · f 收藏 · F 收藏模式 · h 帮助 · s 随机 · m 循环 · t 主题 · / 搜索 · q 退出"
+          "空格 播放/暂停 · n/p 切歌 · f 收藏 · F 收藏模式 · h 帮助 · s 随机 · m 循环 · t 主题 · / 搜索 · M 静音 · q 退出"
         this.statusLeft.fg = this.theme.subtext
       }
     }

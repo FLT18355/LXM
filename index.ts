@@ -34,6 +34,7 @@ const HELP = `
   m  循环模式   /  搜索(支持中文)   f/F  收藏
   l/L  歌词开关/全屏歌词 (KTV)     d  重新扫描目录
   h  帮助   q/Esc  退出
+  M/0  静音
 `
 
 async function handleConfig(args: string[]): Promise<void> {

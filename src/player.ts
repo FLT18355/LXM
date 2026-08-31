@@ -26,6 +26,7 @@ export class Player {
   showLyrics = true
 
   volume = 100
+  muted = false
   speed = 1.0
 
   favorites: string[] = []
@@ -211,6 +212,11 @@ export class Player {
     await this.mpv.setProperty("volume", this.volume)
   }
 
+  async toggleMute(): Promise<void> {
+    this.muted = !this.muted
+    await this.mpv.setProperty("mute", this.muted)
+  }
+
   async setSpeed(s: number): Promise<void> {
     this.speed = Math.max(0.25, Math.min(4.0, Math.round(s * 100) / 100))
     await this.mpv.setProperty("speed", this.speed)
@@ -218,6 +224,11 @@ export class Player {
 
   async seek(sec: number): Promise<void> {
     if (this.playing) await this.mpv.seek(sec)
+  }
+
+  /** 绝对定位跳转 (进度条点击/拖动) */
+  async seekTo(sec: number): Promise<void> {
+    if (this.playing) await this.mpv.seek(sec, true)
   }
 
   /** 每帧调用: 处理淡入淡出 */
