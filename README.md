@@ -1,6 +1,6 @@
 # 蓝汐音乐 (lxm-tui)
 
-![OpenTUI 版本](https://img.shields.io/badge/dynamic/json?url=数据接口地址&label=OpenTUI&query=查询版本号的路径&color=blue)
+![OpenTUI 版本](https://img.shields.io/badge/dynamic/json?url=https://registry.npmjs.org/@opentui/core/latest&label=OpenTUI&query=$.version&color=blue)
 
 OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 AI 制作，当前版本使用的OoenTUI版本为: 0.5.6
 
