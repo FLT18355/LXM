@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec bun /home/$USER/flt18355/lxm/index.ts "$@"

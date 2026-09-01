@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+if [ -f "index.ts" ]; then
+    echo "找到 index.ts，开始准备安装"
+    echo "当前用户: $USER"
+    
+    # 使用 $USER 构建通用目标路径（保留 flt18355 子目录）
+    TARGET_DIR="/home/$USER/flt18355/lxm/"
+    
+    echo "目标路径: $TARGET_DIR"
+    
+    # 检查目标目录是否在当前目录下，防止递归复制
+    CURRENT_DIR=$(pwd)
+    if [[ "$TARGET_DIR" == "$CURRENT_DIR"* ]]; then
+        echo "错误: 目标目录 '$TARGET_DIR' 位于当前目录下，这会导致递归复制。"
+        exit 1
+    fi
+    
+    # --- 新增：如果目标目录存在，则删除它 ---
+    if [ -d "$TARGET_DIR" ]; then
+        echo "检测到目标目录已存在，正在删除旧目录..."
+        rm -rf "$TARGET_DIR"
+        echo "旧目录已删除。"
+    fi
+    
+    # 创建目标目录（如果不存在）
+    mkdir -p "$TARGET_DIR"
+    
+    # 询问用户是否继续
+    read -p "确认将当前目录内容复制到 '$TARGET_DIR'? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "操作已取消。"
+        exit 0
+    fi
+    
+    # 复制当前目录下的所有内容（包括隐藏文件）到目标目录
+    # 使用 dotglob 选项包括隐藏文件，并避免复制 '.' 和 '..'
+    shopt -s dotglob
+    cp -r . "$TARGET_DIR"
+    shopt -u dotglob
+    
+    echo "文件已复制到 $TARGET_DIR"
+    
+    mv -f ./bin/lxm ~/.local/bin/
+    
+    echo "成功安装 LX Music"
+    
+else
+    echo "index.ts 未找到，请在项目目录下面使用该脚本。"
+    exit 1
+fi

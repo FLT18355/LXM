@@ -1,6 +1,6 @@
 # 蓝汐音乐 (lxm-tui)
 
-OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm.py` 移植而来，全新 UI ✨
+OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 AI 制作
 
 ## 特性
 
@@ -28,6 +28,14 @@ bun index.ts -v / --version        # 显示版本
 bun index.ts config                # 查看当前配置
 bun index.ts config --music-directory /path/to/music   # 设置音乐目录
 ```
+
+## openTUI
+
+```bash
+bun add @opentui/core # 安装openTUI(要在项目里面)
+npx skills add anomalyco/opentui --skill opentui # AI skills
+```
+
 
 配置保存在 `~/.config/lxmusic/config.toml`（与 Python 版兼容，可混用）。
 

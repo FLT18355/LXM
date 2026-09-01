@@ -20,7 +20,7 @@ import { parseThemeName } from "./src/theme"
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: dev-0.0.0.10465
+版本: dev-0.0.0.10583
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -80,7 +80,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("dev-0.0.0.10465")
+    console.log("dev-0.0.0.10583")
     return
   }
   let dirArg: string | undefined
