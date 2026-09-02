@@ -4,6 +4,7 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
+import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
 import type { MpvClient } from "./mpv"
 
 export type RepeatMode = "OFF" | "ALL" | "ONE"
@@ -28,9 +29,11 @@ export class Player {
   volume = 100
   muted = false
   speed = 1.0
-
   favorites: string[] = []
   favMode = false
+
+  // 歌单: 加载一次, 增删改时立刻写回 playlists.toml
+  playlists: Playlist[] = []
 
   // 淡入淡出
   fadeState: "in" | "out" | null = null
@@ -306,5 +309,75 @@ export class Player {
 
   currentBase(): string {
     return this.currentPath ? baseName(this.currentPath) : "—"
+  }
+  // ---------- 歌单数据操作 ----------
+  // 加载歌单 (启动时由 index.ts 调一次)
+  loadPlaylists(): void {
+    this.playlists = loadPlaylists()
+  }
+
+  /** 按名字查找歌单下标; -1 表示没有 */
+  findPlaylist(name: string): number {
+    return this.playlists.findIndex((p) => p.name === name)
+  }
+
+  /** 新建空歌单; 重名返回 -1, 成功返回新下标 */
+  createPlaylist(name: string): number {
+    name = name.trim()
+    if (!name) return -1
+    if (this.findPlaylist(name) !== -1) return -1
+    this.playlists.push({ name, paths: [] })
+    savePlaylists(this.playlists)
+    return this.playlists.length - 1
+  }
+
+  /** 删除歌单; 不存在返回 false */
+  deletePlaylist(name: string): boolean {
+    const i = this.findPlaylist(name)
+    if (i === -1) return false
+    this.playlists.splice(i, 1)
+    savePlaylists(this.playlists)
+    return true
+  }
+
+  /** 重命名; 新名空/重名返回 false */
+  renamePlaylist(oldName: string, newName: string): boolean {
+    newName = newName.trim()
+    if (!newName) return false
+    const i = this.findPlaylist(oldName)
+    if (i === -1) return false
+    if (oldName === newName) return true
+    if (this.findPlaylist(newName) !== -1) return false
+    this.playlists[i].name = newName
+    savePlaylists(this.playlists)
+    return true
+  }
+
+  /** 把歌曲加入歌单; 已在里面则 no-op. 返回是否新增 */
+  addTrackToPlaylist(name: string, path: string): boolean {
+    const i = this.findPlaylist(name)
+    if (i === -1) return false
+    const p = this.playlists[i]
+    if (p.paths.includes(path)) return false
+    p.paths.push(path)
+    savePlaylists(this.playlists)
+    return true
+  }
+
+  /** 从歌单移除一首歌; 返回是否真删了 */
+  removeTrackFromPlaylist(name: string, idx: number): boolean {
+    const i = this.findPlaylist(name)
+    if (i === -1) return false
+    const p = this.playlists[i]
+    if (idx < 0 || idx >= p.paths.length) return false
+    p.paths.splice(idx, 1)
+    savePlaylists(this.playlists)
+    return true
+  }
+
+  /** 取歌单路径列表 (浅拷贝, 防止外部乱改) */
+  playlistPaths(name: string): string[] {
+    const p = this.playlists.find((x) => x.name === name)
+    return p ? [...p.paths] : []
   }
 }

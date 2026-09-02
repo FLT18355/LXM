@@ -20,7 +20,7 @@ import { parseThemeName } from "./src/theme"
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: dev-0.0.0.10583
+版本: r-0.1
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -33,6 +33,7 @@ const HELP = `
   +/-  音量   ↑↓/jk  选择          s  随机
   m  循环模式   /  搜索(支持中文)   f/F  收藏
   l/L  歌词开关/全屏歌词 (KTV)     d  重新扫描目录
+  P    歌单列表 (n 新建/ r 重命名/ d 删除/ Enter 进入/ a 加歌/ x 移除)
   h  帮助   q/Esc  退出
   M/0  静音
 `
@@ -80,7 +81,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("dev-0.0.0.10583")
+    console.log("r-0.1")
     return
   }
   let dirArg: string | undefined
@@ -197,6 +198,7 @@ async function main() {
 
   // ---------- 恢复断点续播 ----------
   player.favorites = Array.isArray(cfg["favorites"]) ? (cfg["favorites"] as string[]) : []
+  player.loadPlaylists()
   const lastPath = cfg["last_path"] as string | undefined
   const lastPos = Number(cfg["last_pos"] || 0)
   if (lastPath) {

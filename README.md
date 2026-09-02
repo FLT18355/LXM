@@ -1,8 +1,6 @@
 # 蓝汐音乐 (lxm-tui)
 
-![OpenTUI 版本](https://img.shields.io/badge/dynamic/json?url=https://registry.npmjs.org/@opentui/core/latest&label=OpenTUI&query=$.version&color=blue)
-
-OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 AI 制作，当前版本使用的OoenTUI版本为: 0.5.6
+OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm.py` 移植而来，全新 UI ✨
 
 ## 特性
 
@@ -12,6 +10,7 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 AI 制作，当
 - 🔀 随机播放（shuffle）
 - 🔍 中文搜索（原生 Unicode 输入框）
 - ♥ 收藏夹 + 只看收藏模式（`f` / `F`）
+- 📑 歌单管理：创建 / 重命名 / 删除歌单，进入歌单详情，选歌加入 / 移除，独立持久化为 `playlists.toml`（`P` 键进入）
 - 🎨 四种 Catppuccin 主题: Latte 拿铁 / Frappé 冰沙 / Macchiato 玛奇朵 / Mocha 摩卡 (`t` 循环切换, 自动保存)
 - 💾 断点续播：退出记住歌曲与位置，重开自动续播
   - 🎚 切歌淡入淡出（渐弱 → 渐强）
@@ -31,14 +30,6 @@ bun index.ts config                # 查看当前配置
 bun index.ts config --music-directory /path/to/music   # 设置音乐目录
 ```
 
-## OpenTUI
-
-```bash
-bun add @opentui/core # 安装openTUI(要在项目里面)
-npx skills add anomalyco/opentui --skill opentui # AI skills
-```
-
-
 配置保存在 `~/.config/lxmusic/config.toml`（与 Python 版兼容，可混用）。
 
 ## 快捷键
@@ -54,6 +45,8 @@ npx skills add anomalyco/opentui --skill opentui # AI skills
 | l / L | 歌词开关 / 全屏歌词 | f / F | 收藏 / 只看收藏 |
 | d | 重新扫描目录 | h | 帮助 (任意键关闭) |
 | t | 切换主题 (Latte→Frappé→Macchiato→Mocha) | q / Esc | 退出 / 退出搜索 |
+| P | 打开歌单列表 | n / r / d | 歌单内: 新建 / 重命名 / 删除 |
+| Enter | 歌单内: 进入歌单 | a / x | 歌单详情: 加歌 / 移除 |
 
 
 ## 开发
@@ -76,6 +69,7 @@ src/scanner.ts  音乐目录递归扫描
 src/lrc.ts      LRC 歌词解析
 src/mpv.ts      mpv JSON IPC 客户端 (Bun unix socket, 事件驱动)
 src/player.ts   播放器状态与逻辑
+src/playlists.ts 歌单持久化 (TOML 子表数组)
 src/theme.ts    Catppuccin 四口味主题 (Latte/Frappé/Macchiato/Mocha)
 src/ui.ts       OpenTUI 界面, 支持 t 键实时切换主题
 ```
