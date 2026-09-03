@@ -367,10 +367,10 @@ export class PlayerUI {
       ["随机与循环", "s 随机播放开关 · m 循环模式(不循环→列表→单曲)"],
       ["歌词与全屏", "l 歌词显示开关 · L 全屏 KTV 歌词"],
       ["收藏与模式", "f 收藏当前歌曲 · 2 收藏视图 · F 收藏模式(快捷)"],
-      ["倍速与音量", "r 减速(0.25x步长) · a 加速 · + 增音量 · - 减音量 · M/0 静音"],
+      ["音量", "+ 增音量 · - 减音量 · M/0 静音 · 倍速在 \uF013 设置调整"],
       ["歌单", "3 歌单 · n 新建 · r 重命名 · d 删除 · Enter 进入详情 · a 加歌 · x 移除"],
       ["搜索与重扫", "/ 搜索(支持中文) · Enter 确认 · Esc 取消 · d 重新扫描目录"],
-      ["设置", "4 进入 \uF013 设置 · 主题(Catppuccin 四口味) / 音量(自动保存) / 音乐目录 · h 帮助"],
+      ["设置", "4 进入 \uF013 设置 · 主题(Catppuccin 四口味) / 音量 / 倍速(自动保存) / 音乐目录 · h 帮助"],
       ["退出", "q / Esc 退出播放器"],
       ["贴心功能", "断点续播(退出记位置) · 切歌淡入淡出"],
     ]
@@ -779,14 +779,6 @@ export class PlayerUI {
         this.flash(`音量 ${p.volume} (已保存)`)
         this.updatePlaylist()
         break
-      case seq === "r":
-        p.setSpeed(p.speed - 0.25)
-        this.flash(`倍速 ${p.speed.toFixed(2)}x`)
-        break
-      case seq === "a":
-        p.setSpeed(p.speed + 0.25)
-        this.flash(`倍速 ${p.speed.toFixed(2)}x`)
-        break
       case seq === "d":
         this.refreshDir()
         break
@@ -879,7 +871,7 @@ export class PlayerUI {
   /** 当前视图的行数 */
   private listCount(): number {
     const p = this.p
-    if (this.view === "settings") return 3
+    if (this.view === "settings") return 4
     if (this.view === "pl") {
       if (this.plLevel === "list") return p.playlists.length
       // detail: plCurrent 的歌曲; picker: 全库
@@ -966,14 +958,15 @@ export class PlayerUI {
 
   // ---------- 设置视图 ----------
 
-  /** 设置项 Enter: 0 主题循环 / 2 改目录弹层 */
+  /** 设置项 Enter: 0 主题循环 / 3 改目录弹层 */
   settingEnter() {
     if (this.sel === 0) this.cycleTheme()
-    else if (this.sel === 2) this.openPlDialog("set-dir", this.p.musicDir)
+    else if (this.sel === 3) this.openPlDialog("set-dir", this.p.musicDir)
+    else if (this.sel === 2) this.flash("用 ←/→ 调整倍速喵~ (步进 0.25, 自动保存)")
     else this.flash("用 ←/→ 或 +/- 调整音量喵~ (自动保存)")
   }
 
-  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5 (持久化) */
+  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5, 倍速=∓0.25 (持久化) */
   settingAdjust(dir: number) {
     const p = this.p
     if (this.sel === 0) {
@@ -988,6 +981,12 @@ export class PlayerUI {
       saveConfig({ volume: p.volume })
       this.flash(`音量 ${p.volume} (已保存)`)
       this.updatePlaylist()
+    } else if (this.sel === 2) {
+      p.setSpeed(p.speed + dir * 0.25).then(() => {
+        saveConfig({ speed: p.speed })
+        this.flash(`倍速 ${p.speed.toFixed(2)}x (已保存)`)
+        this.updatePlaylist()
+      })
     }
   }
 
@@ -1437,6 +1436,7 @@ export class PlayerUI {
       const rows = [
         `主题        ${THEME_LABEL[this.themeName]}  (${THEME_ORDER.length} 种, ←/→ 或 Enter 切换)`,
         `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
+        `倍速        ${p.speed.toFixed(2)}x  (←/→ 步进 0.25, 0.25x~4x, 自动保存)`,
         `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
       ]
       return { marker: " ", text: rows[i] || "", playing: false }
@@ -1659,6 +1659,8 @@ export class PlayerUI {
       else break
     }
     if (cur < 0) cur = 0
+    // 同一时间戳的多句 (和声/重复词) 一起高亮
+    const curTime = p.lyrics[cur].time
     if (this.lyricRows.length !== H) this.buildLyricRows(H)
     const center = Math.floor(H / 2)
     for (let r = 0; r < H; r++) {
@@ -1666,7 +1668,7 @@ export class PlayerUI {
       const row = this.lyricRows[r]
       if (lineIdx >= 0 && lineIdx < p.lyrics.length) {
         const txt = clipWidth(p.lyrics[lineIdx].text, (this.lyricInner.width || 40) - 4)
-        if (r === center) {
+        if (p.lyrics[lineIdx].time === curTime) {
           row.content = t`${fg(this.theme.sky)(bold("\uF001 " + txt))}`
         } else {
           const dist = Math.abs(r - center)
@@ -1722,13 +1724,15 @@ export class PlayerUI {
       else break
     }
     if (cur < 0) cur = 0
+    // 同一时间戳的多句一起高亮
+    const curTime = p.lyrics[cur].time
     const MID = Math.floor(this.fullLyricRows.length / 2)
     for (let r = 0; r < this.fullLyricRows.length; r++) {
       const offset = r - MID
       const idx = cur + offset
       const row = this.fullLyricRows[r]
-      if (offset === 0) {
-        row.content = t`${fg(this.theme.sky)(bold("\uF001     " + p.lyrics[cur].text))}`
+      if (idx >= 0 && idx < p.lyrics.length && p.lyrics[idx].time === curTime) {
+        row.content = t`${fg(this.theme.sky)(bold("\uF001     " + p.lyrics[idx].text))}`
       } else if (idx >= 0 && idx < p.lyrics.length) {
         const col = Math.abs(offset) <= 1 ? this.theme.subtext : this.theme.overlay
         row.content = t`${fg(col)("      " + p.lyrics[idx].text)}`

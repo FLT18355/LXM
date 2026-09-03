@@ -1,9 +1,9 @@
 // 主题测试: 默认 latte, 循环切换, 树重建正常
 import { createTestRenderer } from "@opentui/core/testing"
-import { Player } from "./src/player"
-import { PlayerUI } from "./src/ui"
-import { THEME_ORDER, THEMES } from "./src/theme"
-import type { MpvClient, MpvEvent } from "./src/mpv"
+import { Player } from "../src/player"
+import { PlayerUI } from "../src/ui"
+import { THEME_ORDER, THEMES } from "../src/theme"
+import type { MpvClient, MpvEvent } from "../src/mpv"
 
 const handlers: Array<(ev: MpvEvent) => void> = []
 const fakeMpv = {

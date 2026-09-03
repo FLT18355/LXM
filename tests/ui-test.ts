@@ -1,12 +1,12 @@
 /**
  * UI 无头测试 — 用 createTestRenderer 验证界面渲染 + 交互
- * 运行: bun ui-test.ts
+ * 运行: bun tests/ui-test.ts
  */
 import { BoxRenderable, TextRenderable, createCliRenderer } from "@opentui/core"
 import { createTestRenderer, KeyCodes } from "@opentui/core/testing"
-import { Player } from "./src/player"
-import { PlayerUI } from "./src/ui"
-import type { MpvClient, MpvEvent } from "./src/mpv"
+import { Player } from "../src/player"
+import { PlayerUI } from "../src/ui"
+import type { MpvClient, MpvEvent } from "../src/mpv"
 
 // ---------- fake mpv ----------
 const handlers: Array<(ev: MpvEvent) => void> = []

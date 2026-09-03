@@ -1,8 +1,8 @@
 // 回归测试: 搜索结果选中项播放时应映射到搜索结果, 而非普通列表第 N 首
 import { createTestRenderer } from "@opentui/core/testing"
-import { Player } from "./src/player"
-import { PlayerUI } from "./src/ui"
-import type { MpvClient, MpvEvent } from "./src/mpv"
+import { Player } from "../src/player"
+import { PlayerUI } from "../src/ui"
+import type { MpvClient, MpvEvent } from "../src/mpv"
 
 const handlers: Array<(ev: MpvEvent) => void> = []
 let loaded: string[] = []

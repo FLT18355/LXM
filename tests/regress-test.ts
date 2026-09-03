@@ -1,8 +1,8 @@
 // 回归测试: 播放中按回车选歌, 旧文件 end-file(stop) 不应触发自动切歌
 import { createTestRenderer } from "@opentui/core/testing"
-import { Player } from "./src/player"
-import { PlayerUI } from "./src/ui"
-import type { MpvClient, MpvEvent } from "./src/mpv"
+import { Player } from "../src/player"
+import { PlayerUI } from "../src/ui"
+import type { MpvClient, MpvEvent } from "../src/mpv"
 
 const handlers: Array<(ev: MpvEvent) => void> = []
 let loaded: string[] = []

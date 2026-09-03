@@ -1,6 +1,6 @@
 /**
  * 歌单功能无头测试 — 用 createTestRenderer 验证歌单 UI 全流程
- * 运行: bun playlist-test.ts
+ * 运行: bun tests/playlist-test.ts
  *
  * 覆盖:
  *  1. P 键打开歌单列表
@@ -20,10 +20,10 @@
 import { TEST_PLAYLISTS_FILE } from "./playlist-test-env.ts"
 import { existsSync, readFileSync, rmSync } from "fs"
 import { createTestRenderer } from "@opentui/core/testing"
-import { Player } from "./src/player"
-import { PlayerUI } from "./src/ui"
-import { PLAYLISTS_FILE } from "./src/playlists"
-import type { MpvClient, MpvEvent } from "./src/mpv"
+import { Player } from "../src/player"
+import { PlayerUI } from "../src/ui"
+import { PLAYLISTS_FILE } from "../src/playlists"
+import type { MpvClient, MpvEvent } from "../src/mpv"
 
 let failures = 0
 function check(label: string, cond: boolean) {

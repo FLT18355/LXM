@@ -6,7 +6,10 @@
   "module": "index.ts",
   "scripts": {
     "start": "bun index.ts",
-    "config": "bun index.ts config"
+    "config": "bun index.ts config",
+    "build": "bun build --compile --target=bun-linux-arm64 index.ts --outfile dist/lxm-tui",
+    "build:portable": "./build-portable.sh",
+    "test": "bun tests/ui-test.ts && bun tests/theme-test.ts && bun tests/playlist-test.ts && bun tests/regress-test.ts && bun tests/regress2-test.ts"
   },
   "dependencies": {
     "@opentui/core": "^0.5.4"

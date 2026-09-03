@@ -29,7 +29,7 @@ const HELP = `
 
 快捷键:
   空格/Enter  播放/暂停/播放选中   n/p  下一首/上一首
-  ←/→  ±5秒   [/]  ±10秒          r/a  减速/加速
+  ←/→  ±5秒   [/]  ±10秒          倍速在 \uF013 设置调整
   +/- 音量 (自动保存) ^v/jk 选择 s 随机
   m 循环模式 / 搜索(支持中文) f/F 收藏
   l/L 歌词开关/全屏歌词 (KTV) d 重新扫描目录
@@ -194,9 +194,11 @@ async function main() {
   player.musicDir = musicDir
   player.playlist = playlist
   player.queue = playlist.map((_, i) => i)
-  // 音量: 从配置恢复 (mpv 淡入以 player.volume 为目标)
+  // 音量/倍速: 从配置恢复 (mpv 淡入以 player.volume 为目标; speed 在 loadfile 后应用)
   const savedVol = Number(cfg["volume"])
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol
+  const savedSpeed = Number(cfg["speed"])
+  if (Number.isFinite(savedSpeed) && savedSpeed >= 0.25 && savedSpeed <= 4.0) player.speed = savedSpeed
 
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
 
