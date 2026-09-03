@@ -1,5 +1,10 @@
 /**
- * OpenTUI 界面 — Catppuccin Latte 主题音乐播放器
+ * OpenTUI 界面 — Catppuccin 四口味主题音乐播放器
+ *
+ * 列表区四视图 tab: 播放列表 / 收藏 / 歌单 / 设置 (1/2/3/4 或鼠标点击切换)
+ * 歌单 tab 内二级: 歌单列表 → 某歌单详情 (Enter 进入, Esc 返回)
+ * 歌单详情内 a 进入"加歌选歌"模式 (Enter 加入, Esc 返回)
+ * 设置 tab: 主题 (←/→ 或 Enter 循环) / 音量 (←/→ ±5, 持久化) / 音乐目录 (Enter 弹层输入路径)
  */
 import {
   BoxRenderable,
@@ -15,17 +20,22 @@ import {
   type KeyEvent,
   type MouseEvent,
 } from "@opentui/core"
+import { existsSync } from "fs"
+import { resolve } from "path"
 import { Player, REPEAT_CYCLE } from "./player"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
-import { saveConfig } from "./config"
+import { loadConfig, saveConfig } from "./config"
 import type { MpvEvent } from "./mpv"
-import type { Playlist } from "./playlists"
 
 const REPEAT_LABEL: Record<string, string> = {
   OFF: "不循环",
   ALL: "列表循环",
   ONE: "单曲循环",
 }
+
+// 四视图 tab: 顺序即快捷键 1/2/3/4
+const TAB_KEYS: Array<"list" | "fav" | "pl" | "settings"> = ["list", "fav", "pl", "settings"]
+const TAB_LABELS = [" \uF03A 播放列表 ", " \uF004 收藏 ", " \uF1C5 歌单 ", " \uF013 设置 "]
 
 const EQ_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆"]
 
@@ -63,21 +73,19 @@ export class PlayerUI {
   private lastLyricIdx = -1
   private lastPlTitle = ""
 
-  // 歌单 UI 状态
-  // plMode: 歌单列表覆盖层 (P 键进入)
-  // plDetailMode: 进入了某个歌单的详情
-  // plPickerMode: 从主歌单或歌单详情按 a 触发的"加歌选歌"模式
-  plMode = false
-  plDetailMode = false
-  plPickerMode = false
-  plSel = 0
-  plDetailSel = 0
-  plCurrent: string | null = null  // 当前详情页的歌单名
-  plLastFlash = ""  // tick 时只更新一次 title
+  // 列表区四视图 tab: 播放列表 / 收藏 / 歌单 / 设置
+  view: "list" | "fav" | "pl" | "settings" = "list"
+  plLevel: "list" | "detail" = "list" // 歌单 tab 内: 歌单列表 / 某歌单详情
+  plPickerMode = false // 歌单详情 a 触发的"加歌选歌"
+  plCurrent: string | null = null // 详情/选歌模式的当前歌单名
+  private savedListSel = 0 // 进歌单前列表游标, 返回时恢复
+  private savedFavSel = 0 // 进设置前收藏游标, 返回时恢复
+  private dirInput = "" // 设置: 改目录弹层输入缓冲
 
-  // 弹层输入态: "new" 新建 / "rename" 重命名 / null 不弹
-  plDialogMode: "new" | "rename" | null = null
+  // 弹层输入态: "new" 新建 / "rename" 重命名 / "set-dir" 改音乐目录 / null 不弹
+  plDialogMode: "new" | "rename" | "set-dir" | null = null
   plDialogValue = ""
+
   // ---------- 节点引用 ----------
   private eqText!: TextRenderable
   private headModeText!: TextRenderable
@@ -86,8 +94,8 @@ export class PlayerUI {
   private nowTitleText!: TextRenderable
   private progressText!: TextRenderable
   private timeText!: TextRenderable
+  private lyricInner!: BoxRenderable
   private lyricRows: TextRenderable[] = []
-  private lyricBoxHeight = 4
   private plTitle!: TextRenderable
   private plRows: Array<{ box: BoxRenderable; text: TextRenderable }> = []
   private scrollbox!: ScrollBoxRenderable
@@ -97,26 +105,20 @@ export class PlayerUI {
   private fullLyricRows: TextRenderable[] = []
   private timeBox!: BoxRenderable
   private nowPlayBox!: BoxRenderable
-  private lastProgW = -1
-  private lastLyricRowH = -1
   private searchInput!: InputRenderable
   private helpOverlay!: BoxRenderable
   private fullOverlay!: BoxRenderable
   private fullTitle!: TextRenderable
   private fullProgress!: TextRenderable
-  // 歌单相关节点
-  private plListOverlay!: BoxRenderable
-  private plListTitle!: TextRenderable
-  private plListScroll!: ScrollBoxRenderable
-  private plListRows: Array<{ box: BoxRenderable; text: TextRenderable }> = []
-  private plDetailOverlay!: BoxRenderable
-  private plDetailTitle!: TextRenderable
-  private plDetailScroll!: ScrollBoxRenderable
-  private plDetailRows: Array<{ box: BoxRenderable; text: TextRenderable }> = []
+  // 歌单命名/重命名弹层 (保留: 是输入框, 非列表视图)
   private plDialogOverlay!: BoxRenderable
   private plDialogTitle!: TextRenderable
   private plDialogInput!: InputRenderable
   private plDialogHint!: TextRenderable
+  // tab 栏 (播放列表 / 收藏 / 歌单)
+  private tabBar!: BoxRenderable
+  private tabBtns: BoxRenderable[] = []
+  private tabTexts: TextRenderable[] = []
   private theme: Theme = THEMES.latte
   private themeName: ThemeName = "latte"
 
@@ -157,7 +159,7 @@ export class PlayerUI {
       backgroundColor: this.theme.mantle,
     })
     const headLeft = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1, flexShrink: 1 })
-    headLeft.add(new TextRenderable(r, { content: t`${bold(fg(this.theme.sky)("♬ 蓝汐音乐"))}`, selectable: false }))
+    headLeft.add(new TextRenderable(r, { content: t`${bold(fg(this.theme.sky)("\uF025 蓝汐音乐"))}`, selectable: false }))
     this.eqText = new TextRenderable(r, { content: "▁ ▁ ▁ ▁ ▁ ▁", fg: this.theme.lavender, selectable: false })
     headLeft.add(this.eqText)
     this.headModeText = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none" })
@@ -191,7 +193,7 @@ export class PlayerUI {
       gap: 1,
     })
     const nowRow1 = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1 })
-    this.nowStatusText = new TextRenderable(r, { content: "⏹ 待机", fg: this.theme.subtext, selectable: false })
+    this.nowStatusText = new TextRenderable(r, { content: "\uF04D 待机", fg: this.theme.subtext, selectable: false })
     nowRow1.add(this.nowStatusText)
     this.nowTitleText = new TextRenderable(r, {
       content: "—",
@@ -206,8 +208,8 @@ export class PlayerUI {
     this.timeBox = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1 })
     this.progressText = new TextRenderable(r, { content: "", selectable: false, flexGrow: 1 })
     this.timeBox.add(this.progressText)
-    this.timeBox.onMouseDown = (ev) => this.seekFromMouse(ev)
-    this.timeBox.onMouseDrag = (ev) => this.seekFromMouse(ev)
+    this.timeBox.onMouseDown = (ev: MouseEvent) => this.seekFromMouse(ev)
+    this.timeBox.onMouseDrag = (ev: MouseEvent) => this.seekFromMouse(ev)
     this.timeText = new TextRenderable(r, { content: "00:00 / 00:00  0%", fg: this.theme.subtext, selectable: false })
     this.timeBox.add(this.timeText)
     this.nowPlayBox.add(this.timeBox)
@@ -235,7 +237,38 @@ export class PlayerUI {
     this.lyricInner = lyricInner
     root.add(lyricsBox)
 
-    // ── 播放列表 ──
+    // ── 视图切换 tab (播放列表 / 收藏 / 歌单) ──
+    this.tabBar = new BoxRenderable(r, {
+      height: 1,
+      flexDirection: "row",
+      gap: 1,
+      marginLeft: 1,
+      marginRight: 1,
+      marginTop: 1,
+      backgroundColor: this.theme.mantle,
+      paddingLeft: 1,
+    })
+    this.tabBtns = []
+    this.tabTexts = []
+    for (let i = 0; i < TAB_LABELS.length; i++) {
+      const btn = new BoxRenderable(r, {
+        id: `tab-${i}`,
+        height: 1,
+        paddingLeft: 1,
+        paddingRight: 1,
+        backgroundColor: this.theme.surface0,
+        onMouseDown: () => this.setView(TAB_KEYS[i]),
+      })
+      const txt = new TextRenderable(r, { content: TAB_LABELS[i], selectable: false })
+      btn.add(txt)
+      this.tabBar.add(btn)
+      this.tabBtns.push(btn)
+      this.tabTexts.push(txt)
+    }
+    root.add(this.tabBar)
+    this.updateTabBar()
+
+    // ── 播放列表 (三视图共享此区) ──
     const plBox = new BoxRenderable(r, {
       id: "plBox",
       flexDirection: "column",
@@ -327,17 +360,17 @@ export class PlayerUI {
       visible: false,
       zIndex: 100,
     })
-    const helpLines = [
+    const helpLines: [string, string][] = [
       ["播放控制", "空格/Enter 播放|暂停|播放选中 · n/p 下一首/上一首 · . 手动下一首"],
       ["快进快退", "←/→ ±5秒 · [/] ±10秒"],
-      ["列表操作", "↑↓/jk 选择曲目 · 点击行直接播放"],
+      ["列表操作", "↑↓/jk 选择曲目 · 点击行直接播放 · 1/2/3/4 切换 列表/收藏/歌单/设置"],
       ["随机与循环", "s 随机播放开关 · m 循环模式(不循环→列表→单曲)"],
       ["歌词与全屏", "l 歌词显示开关 · L 全屏 KTV 歌词"],
-      ["收藏与模式", "f 收藏当前歌曲 · F 收藏模式"],
+      ["收藏与模式", "f 收藏当前歌曲 · 2 收藏视图 · F 收藏模式(快捷)"],
       ["倍速与音量", "r 减速(0.25x步长) · a 加速 · + 增音量 · - 减音量 · M/0 静音"],
-      ["歌单", "P 歌单列表 · n 新建歌单 · r 重命名 · d 删除 · Enter 进入详情 · a 加歌 · x 移除"],
+      ["歌单", "3 歌单 · n 新建 · r 重命名 · d 删除 · Enter 进入详情 · a 加歌 · x 移除"],
       ["搜索与重扫", "/ 搜索(支持中文) · Enter 确认 · Esc 取消 · d 重新扫描目录"],
-      ["主题与帮助", "t 切换 Catppuccin 四口味(Latte/Frappé/Macchiato/Mocha) · h 帮助"],
+      ["设置", "4 进入 \uF013 设置 · 主题(Catppuccin 四口味) / 音量(自动保存) / 音乐目录 · h 帮助"],
       ["退出", "q / Esc 退出播放器"],
       ["贴心功能", "断点续播(退出记位置) · 切歌淡入淡出"],
     ]
@@ -354,7 +387,6 @@ export class PlayerUI {
       }),
     )
     root.add(this.helpOverlay)
-
 
     // ── 全屏歌词覆盖层 ──
     this.fullOverlay = new BoxRenderable(r, {
@@ -380,7 +412,6 @@ export class PlayerUI {
     this.fullOverlay.add(this.fullTitle)
     this.fullProgress = new TextRenderable(r, { content: "", fg: this.theme.lavender, selectable: false })
     this.fullOverlay.add(this.fullProgress)
-    // 歌词主体: 固定 7 行 (前 3 后 3 + 当前句), 每行独立 Text 便于独立样式
     const lyricArea = new BoxRenderable(r, {
       flexGrow: 1,
       flexDirection: "column",
@@ -405,92 +436,6 @@ export class PlayerUI {
       }),
     )
     root.add(this.fullOverlay)
-
-    // ── 歌单列表覆盖层 (P 键) ──
-    this.plListOverlay = new BoxRenderable(r, {
-      position: "absolute",
-      top: 0,
-      left: 0,
-      width: "100%",
-      height: "100%",
-      flexDirection: "column",
-      backgroundColor: this.theme.base,
-      title: " 歌单 ",
-      titleColor: this.theme.pink,
-      paddingLeft: 2,
-      paddingRight: 2,
-      paddingTop: 1,
-      paddingBottom: 1,
-      visible: false,
-      zIndex: 150,
-    })
-    this.plListTitle = new TextRenderable(r, {
-      content: "",
-      fg: this.theme.subtext,
-      selectable: false,
-      paddingBottom: 1,
-    })
-    this.plListOverlay.add(this.plListTitle)
-    this.plListScroll = new ScrollBoxRenderable(r, {
-      flexGrow: 1,
-      flexBasis: 0,
-      scrollbarOptions: {
-        trackOptions: { foregroundColor: this.theme.surface1, backgroundColor: this.theme.base },
-      },
-      rootOptions: { backgroundColor: this.theme.base },
-      contentOptions: { backgroundColor: this.theme.base },
-    })
-    this.plListOverlay.add(this.plListScroll)
-    this.plListOverlay.add(
-      new TextRenderable(r, {
-        content: t`${fg(this.theme.subtext)(" ↑↓/jk 选择 · Enter 进入 · n 新建 · r 重命名 · d 删除 · Esc 返回 ")}`,
-        selectable: false,
-      }),
-    )
-    root.add(this.plListOverlay)
-
-    // ── 歌单详情覆盖层 ──
-    this.plDetailOverlay = new BoxRenderable(r, {
-      position: "absolute",
-      top: 0,
-      left: 0,
-      width: "100%",
-      height: "100%",
-      flexDirection: "column",
-      backgroundColor: this.theme.base,
-      title: " 歌单详情 ",
-      titleColor: this.theme.sky,
-      paddingLeft: 2,
-      paddingRight: 2,
-      paddingTop: 1,
-      paddingBottom: 1,
-      visible: false,
-      zIndex: 160,
-    })
-    this.plDetailTitle = new TextRenderable(r, {
-      content: "",
-      fg: this.theme.subtext,
-      selectable: false,
-      paddingBottom: 1,
-    })
-    this.plDetailOverlay.add(this.plDetailTitle)
-    this.plDetailScroll = new ScrollBoxRenderable(r, {
-      flexGrow: 1,
-      flexBasis: 0,
-      scrollbarOptions: {
-        trackOptions: { foregroundColor: this.theme.surface1, backgroundColor: this.theme.base },
-      },
-      rootOptions: { backgroundColor: this.theme.base },
-      contentOptions: { backgroundColor: this.theme.base },
-    })
-    this.plDetailOverlay.add(this.plDetailScroll)
-    this.plDetailOverlay.add(
-      new TextRenderable(r, {
-        content: t`${fg(this.theme.subtext)(" ↑↓/jk 选择 · Enter 播放 · a 加歌 · x 移除 · Esc 返回歌单列表 ")}`,
-        selectable: false,
-      }),
-    )
-    root.add(this.plDetailOverlay)
 
     // ── 命名/重命名居中弹层 ──
     this.plDialogOverlay = new BoxRenderable(r, {
@@ -535,7 +480,6 @@ export class PlayerUI {
 
     r.root.add(root)
   }
-  private lyricInner!: BoxRenderable
 
   // =========================================================
   //  事件挂接
@@ -568,7 +512,6 @@ export class PlayerUI {
 
   private attachMpvEvents() {
     const p = this.p
-    // 属性观察: time-pos / duration / pause / eof-reached
     p.mpv.observeProperty(1, "time-pos")
     p.mpv.observeProperty(2, "duration")
     p.mpv.observeProperty(3, "pause")
@@ -580,7 +523,6 @@ export class PlayerUI {
         const data = ev.data as unknown
         if (prop === "time-pos" && typeof data === "number" && Number.isFinite(data)) {
           p.timePos = data
-          // 断点续播: 文件加载后跳转一次
           if (p.pendingSeek !== null && data > 0.2) {
             p.mpv.seek(p.pendingSeek, true)
             p.pendingSeek = null
@@ -591,7 +533,6 @@ export class PlayerUI {
           p.paused = data === true
         }
       } else if (name === "file-loaded") {
-        // 新文件就位: 恢复 end-file 处理 (解除切歌抑制)
         p.onFileLoaded()
       } else if (name === "end-file") {
         const reason = ev.reason as string
@@ -631,7 +572,6 @@ export class PlayerUI {
       key.preventDefault()
       return
     }
-    // 搜索浏览态不再单独拦截按键: 所有正常快捷键可用, sel 自动映射到队列
     // 搜索输入模式: Esc 取消, 其余按键交给输入框
     if (this.searchMode) {
       if (key.name === "escape") {
@@ -640,7 +580,6 @@ export class PlayerUI {
       }
       return
     }
-
     // 歌单命名/重命名弹层: 拦截所有按键, 由 input 自处理
     if (this.plDialogMode) {
       if (name === "escape") {
@@ -650,61 +589,60 @@ export class PlayerUI {
       return
     }
 
-    // 歌单列表 / 详情 / 加歌选歌 (P 键进入)
-    if (this.plMode || this.plDetailMode || this.plPickerMode) {
+    // 视图内导航: j/k/up/down 由各视图处理 (统一用 sel + 视图感知计数)
+    if (name === "up" || seq === "k") {
+      this.moveSel(-1)
+      key.preventDefault()
+      return
+    }
+    if (name === "down" || seq === "j") {
+      this.moveSel(1)
+      key.preventDefault()
+      return
+    }
+
+    // 设置视图 (view==="settings") 特有按键: Esc 返回, ←/→ 调整当前项, Enter 触发
+    if (this.view === "settings") {
+      if (name === "escape") {
+        this.setView("list")
+        key.preventDefault()
+        return
+      }
+      if (name === "left") {
+        this.settingAdjust(-1)
+        key.preventDefault()
+        return
+      }
+      if (name === "right") {
+        this.settingAdjust(1)
+        key.preventDefault()
+        return
+      }
+      if (name === "return" || name === "enter") {
+        this.settingEnter()
+        key.preventDefault()
+        return
+      }
+      // +/- 音量 / 1..4 切视图 / h 帮助 / q 退出 仍走下方 switch
+    }
+
+    // 歌单视图 (view==="pl") 的特有按键
+    if (this.view === "pl") {
       if (name === "escape") {
         if (this.plPickerMode) this.plPickerExit()
-        else if (this.plDetailMode) this.closePlDetail()
-        else this.closePlList()
+        else if (this.plLevel === "detail") this.closePlDetail()
+        else this.setView("list")
         key.preventDefault()
         return
       }
-      if (name === "up" || seq === "k") {
-        if (this.plPickerMode) {
-          this.sel = Math.max(0, this.sel - 1)
-          this.updatePlaylist()
-        } else if (this.plDetailMode) {
-          this.plDetailSel = Math.max(0, this.plDetailSel - 1)
-          this.renderPlDetail()
-        } else {
-          this.plSel = Math.max(0, this.plSel - 1)
-          this.renderPlList()
-        }
-        key.preventDefault()
-        return
-      }
-      if (name === "down" || seq === "j") {
-        if (this.plPickerMode) {
-          const n = this.p.playlist.length
-          if (n) {
-            this.sel = Math.min(n - 1, this.sel + 1)
-            this.updatePlaylist()
-          }
-        } else if (this.plDetailMode) {
-          const n = this.p.playlistPaths(this.plCurrent || "").length
-          if (n) {
-            this.plDetailSel = Math.min(n - 1, this.plDetailSel + 1)
-            this.renderPlDetail()
-          }
-        } else {
-          const n = this.p.playlists.length
-          if (n) {
-            this.plSel = Math.min(n - 1, this.plSel + 1)
-            this.renderPlList()
-          }
-        }
-        key.preventDefault()
-        return
-      }
-      // 加歌选歌模式: Enter 加入, 不退出
       if (this.plPickerMode) {
+        // 加歌选歌模式: Enter 加入, 不退出; 其它键落入正常 switch
         if (name === "return" || name === "enter") {
           this.plPickerAdd()
           key.preventDefault()
           return
         }
-        // 加歌模式下其它键都让播放器正常处理 (搜索等)
-        // 不直接 return, 落入正常 switch
+        // 加歌模式下 P 切回列表 (跳过歌单特有路由)
       } else {
         // 列表 / 详情
         if (name === "return" || name === "enter") {
@@ -717,8 +655,8 @@ export class PlayerUI {
           key.preventDefault()
           return
         }
-        if (seq === "r" && this.plMode) {
-          const cur = this.p.playlists[this.plSel]
+        if (seq === "r" && this.plLevel === "list") {
+          const cur = this.p.playlists[this.sel]
           if (cur) this.openPlDialog("rename", cur.name)
           key.preventDefault()
           return
@@ -728,34 +666,26 @@ export class PlayerUI {
           key.preventDefault()
           return
         }
-        if (seq === "a" && this.plDetailMode) {
+        if (seq === "a" && this.plLevel === "detail") {
           this.enterPlPicker()
           key.preventDefault()
           return
         }
-        if (seq === "x" && this.plDetailMode) {
+        if (seq === "x" && this.plLevel === "detail") {
           this.plDelete()
           key.preventDefault()
           return
         }
-        if (seq === "P" || seq === "p" && this.plMode) {
-          // 列表下按 P 关闭
-          this.closePlList()
+        if (seq === "P") {
+          this.setView("list")
           key.preventDefault()
           return
         }
       }
     }
 
-
     // ---- 正常模式 ----
     switch (true) {
-      case name === "up" || seq === "k":
-        this.moveSel(-1)
-        break
-      case name === "down" || seq === "j":
-        this.moveSel(1)
-        break
       case name === "left":
         this.seek(-5)
         break
@@ -793,7 +723,7 @@ export class PlayerUI {
         break
       case seq === "s":
         p.toggleShuffle()
-        this.flash(p.isShuffle ? "🔀 随机播放已开启" : "🎵 顺序播放已开启")
+        this.flash(p.isShuffle ? "\uF074 随机播放已开启" : "\uF001 顺序播放已开启")
         break
       case seq === "m":
         p.cycleRepeat()
@@ -810,10 +740,27 @@ export class PlayerUI {
         this.favCurrent()
         break
       case seq === "F":
-        this.toggleFavMode()
+        this.setView("fav")
+        key.preventDefault()
+        break
+      case seq === "1":
+        this.setView("list")
+        key.preventDefault()
+        break
+      case seq === "2":
+        this.setView("fav")
+        key.preventDefault()
+        break
+      case seq === "3":
+        this.setView("pl")
+        key.preventDefault()
+        break
+      case seq === "4":
+        this.setView("settings")
+        key.preventDefault()
         break
       case seq === "P":
-        this.togglePlList()
+        this.setView("pl")
         key.preventDefault()
         break
       case seq === "h":
@@ -822,11 +769,15 @@ export class PlayerUI {
         break
       case seq === "+" || seq === "=":
         p.setVolume(p.volume + 5)
-        this.flash(`音量 ${p.volume}`)
+        saveConfig({ volume: p.volume })
+        this.flash(`音量 ${p.volume} (已保存)`)
+        this.updatePlaylist()
         break
       case seq === "-" || seq === "_":
         p.setVolume(p.volume - 5)
-        this.flash(`音量 ${p.volume}`)
+        saveConfig({ volume: p.volume })
+        this.flash(`音量 ${p.volume} (已保存)`)
+        this.updatePlaylist()
         break
       case seq === "r":
         p.setSpeed(p.speed - 0.25)
@@ -840,19 +791,80 @@ export class PlayerUI {
         this.refreshDir()
         break
       case seq === "M" || seq === "0":
-        p.toggleMute().then(() => this.flash(p.muted ? "🔇 已静音喵~" : `音量 ${p.volume} 喵~`))
+        p.toggleMute().then(() => {
+          this.flash(p.muted ? "\uF026 已静音喵~" : `音量 ${p.volume} 喵~`)
+          this.updatePlaylist()
+        })
         break
       case seq === "t":
-        this.cycleTheme()
+        this.flash("主题请在 \uF013 设置 里调整喵~ (4 进入)")
         break
       case seq === "q" || seq === "Q" || name === "escape":
         if (name === "escape" && this.searchActive) {
-          // Esc: 先退出搜索浏览, 再按一次才退出
           this.exitSearch(true)
         } else {
           this.quit()
         }
         break
+    }
+  }
+
+  // =========================================================
+  //  视图切换 (tab)
+  // =========================================================
+
+  /** 切换列表区视图: list / fav / pl / settings */
+  setView(v: "list" | "fav" | "pl" | "settings") {
+    if (this.view === v) {
+      // 再按一次歌单 tab: 若在详情则返回列表
+      if (v === "pl" && this.plLevel === "detail") this.closePlDetail()
+      return
+    }
+    const p = this.p
+    // 离开前保存各视图游标
+    if (this.view === "list") this.savedListSel = this.sel
+    else if (this.view === "fav") this.savedFavSel = this.sel
+    // 从歌单离开: 若在详情/选歌, 先回列表级
+    if (this.view === "pl") {
+      this.plPickerMode = false
+      if (this.plLevel === "detail") this.plLevel = "list"
+      this.plCurrent = null
+    }
+    if (v === "fav") {
+      if (!p.favorites.length) {
+        this.flash("还没有收藏喵~ 按 f 收藏歌曲")
+        return
+      }
+      if (!p.favMode) p.toggleFavMode()
+      this.sel = Math.max(0, Math.min(p.queue.length - 1, this.savedFavSel))
+    } else {
+      // favMode 严格跟随 view: 离开收藏即恢复全量 queue
+      if (p.favMode) p.toggleFavMode()
+      if (v === "pl") {
+        this.plLevel = "list"
+        this.sel = 0
+      } else if (v === "settings") {
+        this.sel = 0
+      } else {
+        this.sel = Math.max(0, Math.min(Math.max(0, p.playlist.length - 1), this.savedListSel))
+      }
+    }
+    this.view = v
+    this.searchActive = false
+    this.searchQuery = ""
+    this.updateTabBar()
+    this.updatePlaylist()
+  }
+
+  /** 刷新 tab 栏高亮 (仅 view 变化时调用) */
+  private updateTabBar() {
+    const curIdx = TAB_KEYS.indexOf(this.view)
+    for (let i = 0; i < this.tabBtns.length; i++) {
+      const active = i === curIdx
+      this.tabBtns[i].backgroundColor = active ? this.theme.surface2 : this.theme.surface0
+      this.tabTexts[i].content = active
+        ? t`${bold(fg(this.theme.sky)(TAB_LABELS[i]))}`
+        : t`${fg(this.theme.subtext)(TAB_LABELS[i])}`
     }
   }
 
@@ -864,23 +876,52 @@ export class PlayerUI {
     this.msgUntil = Date.now() + seconds * 1000
   }
 
+  /** 当前视图的行数 */
+  private listCount(): number {
+    const p = this.p
+    if (this.view === "settings") return 3
+    if (this.view === "pl") {
+      if (this.plLevel === "list") return p.playlists.length
+      // detail: plCurrent 的歌曲; picker: 全库
+      if (this.plPickerMode) return p.playlist.length
+      return this.plCurrent ? p.playlistPaths(this.plCurrent).length : 0
+    }
+    // list / fav: 搜索/收藏时用 queue, 否则全列表
+    if (this.searchActive || (this.view === "fav" && !this.searchActive) || (this.view === "list" && p.favMode)) {
+      return p.queue.length
+    }
+    return p.playlist.length
+  }
+
   moveSel(delta: number) {
-    const n = this.searchActive || this.p.favMode ? this.p.queue.length : this.p.playlist.length
+    const n = this.listCount()
     if (!n) return
     this.sel = Math.max(0, Math.min(n - 1, this.sel + delta))
     this.updatePlaylist()
   }
 
+  /** Enter / 空格播放: 根据视图分发 */
   playSel() {
     const p = this.p
+    if (this.view === "pl") {
+      this.plEnter()
+      return
+    }
+    if (this.view === "settings") {
+      this.settingEnter()
+      return
+    }
     if (!p.playlist.length) return
-    // 搜索/收藏模式: sel 是过滤后队列中的位置, 需映射到真实索引
-    const realIdx = p.selToPlaylistIdx(this.sel, this.searchActive || p.favMode)
+    // list / fav: sel 是 queue 中的位置 (搜索/收藏/favMode) 或 playlist 索引
+    const useQueue = this.searchActive || this.view === "fav" || p.favMode
+    const realIdx = useQueue
+      ? p.selToPlaylistIdx(this.sel, true)
+      : this.sel
     p.playIndex(realIdx).then(() => {
       this.afterTrackChange()
-      // 选中同步到当前播放
       if (p.queue.includes(realIdx)) this.sel = p.queue.indexOf(realIdx)
       else this.sel = realIdx
+      this.updatePlaylist()
     })
   }
 
@@ -898,7 +939,6 @@ export class PlayerUI {
     this.flash(sec > 0 ? `快进 ${sec} 秒喵~` : `快退 ${-sec} 秒喵~`)
   }
 
-  /** 进度条点击/拖动定位: 把鼠标 x 映射到时间 */
   private seekFromMouse(ev: MouseEvent) {
     const p = this.p
     if (!p.playing || p.duration <= 0) return
@@ -913,30 +953,64 @@ export class PlayerUI {
 
   favCurrent() {
     const p = this.p
+    if (this.view === "settings" || this.view === "pl") return
     if (!p.playlist.length) return
-    const realIdx = p.selToPlaylistIdx(this.sel, this.searchActive || p.favMode)
+    const useQueue = this.searchActive || this.view === "fav" || p.favMode
+    const realIdx = useQueue
+      ? p.selToPlaylistIdx(this.sel, true)
+      : this.sel
     const added = p.toggleFavorite(realIdx)
-    this.flash(`${added ? "♥ 已收藏" : "已取消收藏"}: ${p.playlist[realIdx].split("/").pop()}`)
+    this.flash(`${added ? "\uF004 已收藏" : "已取消收藏"}: ${p.playlist[realIdx].split("/").pop()}`)
     this.updatePlaylist()
   }
 
-  toggleFavMode() {
+  // ---------- 设置视图 ----------
+
+  /** 设置项 Enter: 0 主题循环 / 2 改目录弹层 */
+  settingEnter() {
+    if (this.sel === 0) this.cycleTheme()
+    else if (this.sel === 2) this.openPlDialog("set-dir", this.p.musicDir)
+    else this.flash("用 ←/→ 或 +/- 调整音量喵~ (自动保存)")
+  }
+
+  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5 (持久化) */
+  settingAdjust(dir: number) {
     const p = this.p
-    if (p.favMode) {
-      p.toggleFavMode()
-      this.sel = p.idx
-      this.flash("已退出收藏模式")
+    if (this.sel === 0) {
+      const cur = THEME_ORDER.indexOf(this.themeName)
+      const n = THEME_ORDER.length
+      const next = THEME_ORDER[((cur + dir) % n + n) % n]
+      this.applyTheme(next)
+      saveConfig({ theme: next })
+      this.flash(`\uF1FC 主题: ${THEME_LABEL[next]} (已保存)`, 2.2)
+    } else if (this.sel === 1) {
+      p.setVolume(p.volume + dir * 5)
+      saveConfig({ volume: p.volume })
+      this.flash(`音量 ${p.volume} (已保存)`)
       this.updatePlaylist()
-    } else {
-      if (p.favorites.length) {
-        p.toggleFavMode()
-        this.sel = 0
-        this.flash(`♥ 收藏模式: ${p.queue.length} 首`)
-        this.updatePlaylist()
-      } else {
-        this.flash("还没有收藏喵~ 按 f 收藏歌曲")
-      }
     }
+  }
+
+  /** 改音乐目录: 校验 + 持久化 + 重扫 */
+  applyMusicDir(dir: string) {
+    const p = this.p
+    let abs = dir
+    try {
+      abs = resolve(dir)
+    } catch {
+      /* ignore */
+    }
+    if (!existsSync(abs)) {
+      this.flash(`目录不存在喵~: ${dir}`)
+      return
+    }
+    saveConfig({ music_directory: abs })
+    p.musicDir = abs
+    p.refreshDir().then((n) => {
+      this.sel = p.idx
+      this.updatePlaylist()
+      this.flash(`\uF07C 已切换音乐目录: ${abs} (${n} 首)`, 2.5)
+    })
   }
 
   enterSearch() {
@@ -990,12 +1064,18 @@ export class PlayerUI {
     if (restoreAll) {
       this.searchActive = false
       this.searchQuery = ""
-      p.queue = Array.from({ length: p.playlist.length }, (_, i) => i)
+      if (this.view === "fav" || p.favMode) {
+        // 收藏视图退出搜索: 重建收藏 queue
+        p.queue = p.favorites
+          .map((f) => p.playlist.indexOf(f))
+          .filter((i) => i !== -1)
+      } else {
+        p.queue = Array.from({ length: p.playlist.length }, (_, i) => i)
+      }
       this.sel = p.idx
       this.flash("已退出搜索喵~")
       this.updatePlaylist()
     } else {
-      // 取消输入但保留浏览态
       if (this.searchActive) {
         this.searchQuery = ""
         this.flash("已退出搜索喵~")
@@ -1020,13 +1100,11 @@ export class PlayerUI {
   //  主题
   // =========================================================
 
-  /** 切换主题: 重建组件树并恢复界面状态 */
   applyTheme(name: ThemeName) {
     const next = THEMES[name]
     if (!next) return
     const prevName = this.themeName
     if (prevName === name) return
-    // 备份界面状态
     const help = this.showHelp
     const full = this.fullLyrics
     const search = this.searchMode
@@ -1034,12 +1112,12 @@ export class PlayerUI {
     const searchQ = this.searchQuery
     const msg = this.msg
     const msgUntil = this.msgUntil
-    // 歌单状态
-    const plMode = this.plMode
-    const plDetail = this.plDetailMode
+    const view = this.view
+    const plLevel = this.plLevel
     const plCur = this.plCurrent
-    const plSel = this.plSel
-    const plDetailSel = this.plDetailSel
+    const plPicker = this.plPickerMode
+    const savedSel = this.savedListSel
+    const sel = this.sel
 
     for (const ch of this.renderer.root.getChildren()) {
       ch.destroyRecursively()
@@ -1051,7 +1129,6 @@ export class PlayerUI {
     this.fullLyricRows = []
     this.buildTree()
 
-    // 恢复状态
     this.showHelp = help
     this.fullLyrics = full
     this.helpOverlay.visible = help
@@ -1068,32 +1145,28 @@ export class PlayerUI {
       this.statusLeft.visible = false
       this.statusRight.visible = false
     }
+    this.view = view
+    this.plLevel = plLevel
+    this.plCurrent = plCur
+    this.plPickerMode = plPicker
+    this.savedListSel = savedSel
+    this.sel = sel
+    this.lastPlTitle = "" // 标题节点已重建, 缓存作废, 让 tick 重写
+    this.updateTabBar()
     this.updatePlaylist()
     this.updateNowPlaying()
     if (full) this.updateFullLyrics()
-    // 恢复歌单
-    this.plMode = plMode
-    this.plDetailMode = plDetail
-    this.plCurrent = plCur
-    this.plSel = plSel
-    this.plDetailSel = plDetailSel
-    this.plListOverlay.visible = plMode && !plDetail
-    this.plDetailOverlay.visible = plDetail
-    if (plMode) this.renderPlList()
-    if (plDetail) this.renderPlDetail()
   }
 
-  /** 循环切换主题 (t 键) */
   cycleTheme() {
     const cur = THEME_ORDER.indexOf(this.themeName)
     const next = THEME_ORDER[(cur + 1) % THEME_ORDER.length]
     this.applyTheme(next)
     saveConfig({ theme: next })
-    this.flash(`🎨 主题: ${THEME_LABEL[next]}`, 2.2)
+    this.flash(`\uF1FC 主题: ${THEME_LABEL[next]}`, 2.2)
   }
 
   quit() {
-    // 由 index.ts 的 onQuit 回调执行清理
     this.onQuit?.()
   }
 
@@ -1101,78 +1174,62 @@ export class PlayerUI {
   //  歌单
   // =========================================================
 
-  /** 打开/关闭歌单列表覆盖层 (P 键) */
-  togglePlList() {
-    if (this.plMode) {
-      this.closePlList()
-    } else {
-      this.openPlList()
-    }
-  }
-
-  openPlList() {
-    // 先退出其它模式, 避免互相串扰
-    this.plDetailMode = false
-    this.plDetailOverlay.visible = false
-    this.plPickerMode = false
-    this.plMode = true
-    this.plListOverlay.visible = true
-    if (this.plSel >= this.p.playlists.length) this.plSel = 0
-    this.renderPlList()
-  }
-
-  closePlList() {
-    this.plMode = false
-    this.plListOverlay.visible = false
-  }
-
-  /** 歌单列表进入详情 */
+  /** 歌单列表 → 详情 */
   openPlDetail(name: string) {
     this.plCurrent = name
-    this.plDetailMode = true
-    this.plDetailSel = 0
-    this.plDetailOverlay.visible = true
-    // 进入详情后列表层不可见, plMode 必须清掉
-    // 否则 plEnter 里 if(this.plMode) 先匹配, Enter 会走"打开详情"而非"播放选中"
-    this.plMode = false
-    this.plListOverlay.visible = false
-    this.renderPlDetail()
+    this.plLevel = "detail"
+    this.sel = 0
+    this.updatePlaylist()
   }
 
+  /** 详情 → 歌单列表 */
   closePlDetail() {
-    this.plDetailMode = false
-    this.plDetailOverlay.visible = false
+    this.plLevel = "list"
     this.plCurrent = null
-    // 回到歌单列表 (详情是在列表之上的二级页)
-    this.plMode = true
-    this.plListOverlay.visible = true
-    this.renderPlList()
+    this.sel = Math.min(this.sel, Math.max(0, this.p.playlists.length - 1))
+    this.updatePlaylist()
   }
 
-  /** 弹出新建/重命名弹层 (mode 决定行为) */
-  openPlDialog(mode: "new" | "rename", preset = "") {
+  /** 弹出输入弹层: 新建/重命名歌单 / 修改音乐目录 */
+  openPlDialog(mode: "new" | "rename" | "set-dir", preset = "") {
     this.plDialogMode = mode
     this.plDialogValue = preset
     this.plDialogInput.value = preset
+    this.plDialogInput.width = mode === "set-dir" ? 70 : 40
     this.plDialogTitle.content =
-      mode === "new" ? t`${bold(fg(this.theme.sky)(" ✦ 新建歌单 "))}` : t`${bold(fg(this.theme.sky)(" ✎ 重命名歌单 "))}`
-    this.plDialogHint.content = mode === "new" ? "输入名称 · Enter 确认 · Esc 取消" : `原名: ${preset}  ·  Enter 确认 · Esc 取消`
+      mode === "new"
+        ? t`${bold(fg(this.theme.sky)(" \uF067 新建歌单 "))}`
+        : mode === "rename"
+          ? t`${bold(fg(this.theme.sky)(" \uF044 重命名歌单 "))}`
+          : t`${bold(fg(this.theme.sky)(" \uF07B 修改音乐目录 "))}`
+    this.plDialogHint.content =
+      mode === "new"
+        ? "输入名称 · Enter 确认 · Esc 取消"
+        : mode === "rename"
+          ? `原名: ${preset}  ·  Enter 确认 · Esc 取消`
+          : `当前: ${preset}  ·  输入完整路径 · Enter 确认重扫 · Esc 取消`
     this.plDialogOverlay.visible = true
     this.plDialogInput.focus()
   }
 
   closePlDialog() {
+    const wasDir = this.plDialogMode === "set-dir"
     this.plDialogMode = null
     this.plDialogValue = ""
     this.plDialogInput.value = ""
+    this.plDialogInput.width = 40
     this.plDialogOverlay.visible = false
-    // 显式失焦, 否则 InputRenderable 的光标会留在屏幕中央
     this.plDialogInput.blur()
+    if (wasDir && this.view === "settings") this.updatePlaylist()
   }
 
-  /** 弹层 Enter 提交 */
   commitPlDialog(value: string) {
     const v = value.trim()
+    if (this.plDialogMode === "set-dir") {
+      this.closePlDialog()
+      if (v) this.applyMusicDir(v)
+      return
+    }
     if (!v) {
       this.flash("歌单名不能为空喵~")
       this.closePlDialog()
@@ -1185,11 +1242,10 @@ export class PlayerUI {
         this.closePlDialog()
         return
       }
-      this.flash(`✦ 已创建歌单: ${v}`)
-      this.plSel = idx
+      this.flash(`\uF067 已创建歌单: ${v}`)
+      this.sel = idx
     } else if (this.plDialogMode === "rename") {
-      // 列表页重命名时 plCurrent 为 null (closePlDetail 清掉了), 用选中行兜底
-      const target = this.plCurrent ?? this.p.playlists[this.plSel]?.name ?? ""
+      const target = this.plCurrent ?? this.p.playlists[this.sel]?.name ?? ""
       if (!target) {
         this.flash("重命名失败喵~ (找不到歌单)")
         this.closePlDialog()
@@ -1202,187 +1258,98 @@ export class PlayerUI {
         return
       }
       if (this.plCurrent === target) this.plCurrent = v
-      this.flash(`✎ 已重命名为: ${v}`)
-      // 重命名后, 选中原下标 (名称变了, 下标不变)
+      this.flash(`\uF044 已重命名为: ${v}`)
     }
     this.closePlDialog()
-    this.renderPlList()
-    if (this.plDetailMode) this.renderPlDetail()
+    this.updatePlaylist()
   }
 
-  /** 列表/详情按 Enter 时的动作 */
+  /** 歌单视图 Enter: 列表→进详情, 详情→播放选中 */
   plEnter() {
-    if (this.plMode) {
-      const list = this.p.playlists
+    const p = this.p
+    if (this.plLevel === "list") {
+      const list = p.playlists
       if (!list.length) {
         this.flash("还没有歌单喵~ 按 n 新建")
         return
       }
-      const p = list[this.plSel]
-      if (!p) return
-      this.openPlDetail(p.name)
-    } else if (this.plDetailMode && this.plCurrent) {
-      const paths = this.p.playlistPaths(this.plCurrent)
-      const path = paths[this.plDetailSel]
+      const pl = list[this.sel]
+      if (!pl) return
+      this.openPlDetail(pl.name)
+    } else if (this.plLevel === "detail" && this.plCurrent) {
+      const paths = p.playlistPaths(this.plCurrent)
+      const path = paths[this.sel]
       if (!path) return
-      // 把歌单映射成播放队列 (歌曲需在当前扫描目录中), 从选中处开始播
       const q = paths
-        .map((p2) => this.p.playlist.indexOf(p2))
+        .map((p2) => p.playlist.indexOf(p2))
         .filter((i) => i !== -1)
-      const realIdx = this.p.playlist.indexOf(path)
+      const realIdx = p.playlist.indexOf(path)
       if (realIdx === -1) {
         this.flash("歌曲不在当前目录喵~")
         return
       }
-      this.p.queue = q
-      this.p.playIndex(realIdx).then(() => {
+      p.queue = q
+      p.playIndex(realIdx).then(() => {
         this.afterTrackChange()
-        this.closePlDetail()
-        this.closePlList()
-        // 主视图下 sel 是 playlist 索引, 设成 realIdx 让高亮对齐实际播放
+        // 播放后切回列表视图, sel 对齐实际播放
+        this.setView("list")
         this.sel = realIdx
         this.updatePlaylist()
       })
     }
   }
 
-  /** 列表删除当前选中 (要二次确认) */
+  /** 删除: 列表删歌单 / 详情删歌曲 */
   plDelete() {
-    if (this.plMode) {
-      const list = this.p.playlists
-      const p = list[this.plSel]
-      if (!p) return
-      if (!this.p.deletePlaylist(p.name)) return
-      this.flash(`🗑 已删除歌单: ${p.name}`)
-      if (this.plSel >= this.p.playlists.length) this.plSel = Math.max(0, this.p.playlists.length - 1)
-      this.renderPlList()
-    } else if (this.plDetailMode && this.plCurrent) {
-      const paths = this.p.playlistPaths(this.plCurrent)
-      const path = paths[this.plDetailSel]
+    const p = this.p
+    if (this.plLevel === "list") {
+      const list = p.playlists
+      const pl = list[this.sel]
+      if (!pl) return
+      if (!p.deletePlaylist(pl.name)) return
+      this.flash(`\uF1F8 已删除歌单: ${pl.name}`)
+      if (this.sel >= p.playlists.length) this.sel = Math.max(0, p.playlists.length - 1)
+      this.updatePlaylist()
+    } else if (this.plLevel === "detail" && this.plCurrent) {
+      const paths = p.playlistPaths(this.plCurrent)
+      const path = paths[this.sel]
       if (!path) return
-      if (!this.p.removeTrackFromPlaylist(this.plCurrent, this.plDetailSel)) return
+      if (!p.removeTrackFromPlaylist(this.plCurrent, this.sel)) return
       this.flash(`已从歌单移除: ${path.split("/").pop()}`)
-      if (this.plDetailSel >= this.p.playlistPaths(this.plCurrent).length) {
-        this.plDetailSel = Math.max(0, this.p.playlistPaths(this.plCurrent).length - 1)
-      }
-      this.renderPlDetail()
+      const newLen = p.playlistPaths(this.plCurrent).length
+      if (this.sel >= newLen) this.sel = Math.max(0, newLen - 1)
+      this.updatePlaylist()
     }
   }
 
-  /** 详情页按 a: 进入"加歌选歌"模式. 复用 search 风格浏览, 但加歌而非替换 queue */
+  /** 详情页 a: 加歌选歌模式 */
   enterPlPicker() {
     if (!this.plCurrent) return
     this.plPickerMode = true
-    // 用 searchActive + queue 表示"过滤后的浏览" — 但这次 sel→path, 而非 sel→queue
-    // 简化: 不走 queue, 直接用 sel 当 playlist 索引 (主播放列表是源)
     this.sel = 0
-    // 隐藏详情/列表层, 但保留 plCurrent 供加歌与返回使用
-    this.plDetailMode = false
-    this.plDetailOverlay.visible = false
-    this.plMode = false
-    this.plListOverlay.visible = false
     this.flash("选歌模式: Enter 加入歌单 · Esc 取消")
-  }
-
-  /** 加歌选歌模式下按 Enter: 把当前选中的歌加进歌单, 不退出选歌模式 */
-  plPickerAdd() {
-    if (!this.plPickerMode || !this.plCurrent) return
-    if (!this.p.playlist.length) return
-    const idx = this.sel
-    if (idx < 0 || idx >= this.p.playlist.length) return
-    const path = this.p.playlist[idx]
-    const added = this.p.addTrackToPlaylist(this.plCurrent, path)
-    this.flash(added ? `✚ 已加入: ${path.split("/").pop()}` : `已在歌单中: ${path.split("/").pop()}`)
-    // 下移一行, 方便连续加入
-    this.sel = Math.min(this.p.playlist.length - 1, this.sel + 1)
     this.updatePlaylist()
   }
 
-  /** 退出加歌选歌模式 (返回歌单详情) */
+  /** 加歌模式下 Enter: 加入歌单, 不退出 */
+  plPickerAdd() {
+    if (!this.plPickerMode || !this.plCurrent) return
+    const p = this.p
+    if (!p.playlist.length) return
+    const idx = this.sel
+    if (idx < 0 || idx >= p.playlist.length) return
+    const path = p.playlist[idx]
+    const added = p.addTrackToPlaylist(this.plCurrent, path)
+    this.flash(added ? `\uF055 已加入: ${path.split("/").pop()}` : `已在歌单中: ${path.split("/").pop()}`)
+    this.sel = Math.min(p.playlist.length - 1, this.sel + 1)
+    this.updatePlaylist()
+  }
+
+  /** 退出加歌选歌 → 返回歌单详情 */
   plPickerExit() {
     this.plPickerMode = false
-    if (this.plCurrent) this.openPlDetail(this.plCurrent)
-  }
-
-  /** 渲染歌单列表 */
-  private renderPlList() {
-    const list = this.p.playlists
-    // 标题
-    this.plListTitle.content = ` 共 ${list.length} 个歌单 `
-    // 行
-    if (this.plListRows.length !== list.length) {
-      for (const r of this.plListRows) r.box.destroyRecursively()
-      this.plListRows = []
-      for (let i = 0; i < list.length; i++) {
-        const box = new BoxRenderable(this.renderer, {
-          id: `pll-${i}`,
-          width: "100%",
-          height: 1,
-          flexDirection: "row",
-          alignItems: "center",
-          paddingLeft: 2,
-          backgroundColor: this.theme.base,
-        })
-        const text = new TextRenderable(this.renderer, { content: "", selectable: false, width: "100%" })
-        box.add(text)
-        this.plListScroll.add(box)
-        this.plListRows.push({ box, text })
-      }
-    }
-    for (let i = 0; i < list.length; i++) {
-      const row = this.plListRows[i]
-      const pl = list[i]
-      const marker = i === this.plSel ? "▶" : " "
-      const line = `${marker} ${String(i + 1).padStart(2, " ")} ${pl.name}  (${pl.paths.length} 首)`
-      if (i === this.plSel) {
-        row.box.backgroundColor = this.theme.surface1
-        row.text.content = t`${fg(this.theme.text)(bold(clipWidth(line, 200)))}`
-      } else {
-        row.box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.text)(clipWidth(line, 200))}`
-      }
-    }
-    try { this.plListScroll.scrollChildIntoView(`pll-${this.plSel}`) } catch { /* ignore */ }
-  }
-
-  /** 渲染歌单详情 */
-  private renderPlDetail() {
-    if (!this.plCurrent) return
-    const paths = this.p.playlistPaths(this.plCurrent)
-    this.plDetailTitle.content = ` ${this.plCurrent} · ${paths.length} 首 `
-    if (this.plDetailRows.length !== paths.length) {
-      for (const r of this.plDetailRows) r.box.destroyRecursively()
-      this.plDetailRows = []
-      for (let i = 0; i < paths.length; i++) {
-        const box = new BoxRenderable(this.renderer, {
-          id: `pld-${i}`,
-          width: "100%",
-          height: 1,
-          flexDirection: "row",
-          alignItems: "center",
-          paddingLeft: 2,
-          backgroundColor: this.theme.base,
-        })
-        const text = new TextRenderable(this.renderer, { content: "", selectable: false, width: "100%" })
-        box.add(text)
-        this.plDetailScroll.add(box)
-        this.plDetailRows.push({ box, text })
-      }
-    }
-    for (let i = 0; i < paths.length; i++) {
-      const row = this.plDetailRows[i]
-      const name = paths[i].split("/").pop() || ""
-      const marker = i === this.plDetailSel ? "▶" : " "
-      const line = `${marker} ${String(i + 1).padStart(2, " ")} ${name}`
-      if (i === this.plDetailSel) {
-        row.box.backgroundColor = this.theme.surface1
-        row.text.content = t`${fg(this.theme.text)(bold(clipWidth(line, 200)))}`
-      } else {
-        row.box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.text)(clipWidth(line, 200))}`
-      }
-    }
-    try { this.plDetailScroll.scrollChildIntoView(`pld-${this.plDetailSel}`) } catch { /* ignore */ }
+    this.sel = 0
+    this.updatePlaylist()
   }
 
   onQuit: (() => void) | null = null
@@ -1393,19 +1360,15 @@ export class PlayerUI {
   }
 
   // =========================================================
-  //  主菜单 (四选项入口)
-  // =========================================================
-
-  // =========================================================
-  //  播放列表
+  //  播放列表渲染 (按 view 分发)
   // =========================================================
   private rebuildPlaylistRows(count: number) {
-    // 销毁旧的
     for (const row of this.plRows) {
       row.box.destroyRecursively()
     }
     this.plRows = []
     for (let i = 0; i < count; i++) {
+      const rowIdx = i
       const box = new BoxRenderable(this.renderer, {
         id: `pl-${i}`,
         width: "100%",
@@ -1415,19 +1378,7 @@ export class PlayerUI {
         paddingLeft: 2,
         backgroundColor: this.theme.base,
         onMouseDown: () => {
-          const p = this.p
-          if (this.searchActive || p.favMode) {
-            const real = p.queue[i]
-            if (real !== undefined) {
-              this.sel = i
-              this.updatePlaylist()
-              this.playIndex(real)
-            }
-          } else if (i < p.playlist.length) {
-            this.sel = i
-            this.updatePlaylist()
-            this.playIndex(i)
-          }
+          this.onRowClick(rowIdx)
         },
       })
       const text = new TextRenderable(this.renderer, {
@@ -1441,28 +1392,106 @@ export class PlayerUI {
     }
   }
 
+  /** 行点击: 根据视图行为不同 */
+  private onRowClick(i: number) {
+    const p = this.p
+    if (this.view === "settings") {
+      this.sel = i
+      this.updatePlaylist()
+      this.settingEnter()
+      return
+    }
+    if (this.view === "pl") {
+      if (this.plLevel === "list") {
+        this.sel = i
+        this.updatePlaylist()
+        this.plEnter()
+      } else if (this.plPickerMode) {
+        this.sel = i
+        this.updatePlaylist()
+        this.plPickerAdd()
+      } else {
+        // 详情: 点击播放 播放
+        this.sel = i
+        this.updatePlaylist()
+        this.plEnter()
+      }
+    } else {
+      // list / fav
+      this.sel = i
+      this.updatePlaylist()
+      const useQueue = this.searchActive || this.view === "fav" || p.favMode
+      const real = useQueue ? p.queue[i] : i
+      if (real !== undefined) this.playIndex(real)
+    }
+  }
+
+  /** 当前视图每行数据: 返回 [marker, text, isPlaying] */
+  private rowAt(i: number): { marker: string; text: string; playing: boolean } {
+    const p = this.p
+    if (this.view === "settings") {
+      const vol = p.volume
+      const filled = Math.round((vol / 150) * 20)
+      const bar = "█".repeat(filled) + "░".repeat(20 - filled)
+      const mute = p.muted ? " \uF026" : ""
+      const rows = [
+        `主题        ${THEME_LABEL[this.themeName]}  (${THEME_ORDER.length} 种, ←/→ 或 Enter 切换)`,
+        `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
+        `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
+      ]
+      return { marker: " ", text: rows[i] || "", playing: false }
+    }
+    if (this.view === "pl") {
+      if (this.plLevel === "list") {
+        const list = p.playlists
+        const pl = list[i]
+        if (!pl) return { marker: " ", text: "", playing: false }
+        return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${pl.name}  (${pl.paths.length} 首)`, playing: false }
+      }
+      if (this.plPickerMode) {
+        const path = p.playlist[i]
+        if (!path) return { marker: " ", text: "", playing: false }
+        const name = path.split("/").pop() || ""
+        const inPl = this.plCurrent ? p.playlistPaths(this.plCurrent).includes(path) : false
+        return { marker: inPl ? "\uF067" : " ", text: `${String(i + 1).padStart(2, " ")} ${name}`, playing: i === p.idx }
+      }
+      // detail
+      if (!this.plCurrent) return { marker: " ", text: "", playing: false }
+      const paths = p.playlistPaths(this.plCurrent)
+      const path = paths[i]
+      if (!path) return { marker: " ", text: "", playing: false }
+      const name = path.split("/").pop() || ""
+      const realIdx = p.playlist.indexOf(path)
+      return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${name}`, playing: realIdx === p.idx }
+    }
+    // list / fav
+    const useQueue = this.searchActive || this.view === "fav" || p.favMode
+    const orig = useQueue ? p.queue[i] : i
+    if (orig === undefined || !p.playlist[orig]) return { marker: " ", text: "", playing: false }
+    const path = p.playlist[orig]
+    const name = path.split("/").pop() || ""
+    const fav = p.favorites.includes(path)
+    return {
+      marker: orig === p.idx ? "\uF04B" : " ",
+      text: `${String(i + 1).padStart(2, " ")} ${name}${fav ? " \uF004" : ""}`,
+      playing: orig === p.idx,
+    }
+  }
+
   updatePlaylist() {
     const p = this.p
-    const isFav = p.favMode && !this.searchActive
-    const isSearch = this.searchActive
-    const shown = isFav || isSearch ? p.queue : Array.from({ length: p.playlist.length }, (_, i) => i)
-    const n = shown.length
+    const n = this.listCount()
     if (this.plRows.length !== n) this.rebuildPlaylistRows(n)
     for (let i = 0; i < n; i++) {
-      const orig = shown[i]
       const row = this.plRows[i]
-      const path = p.playlist[orig]
-      const name = path.split("/").pop() || ""
-      const isPlaying = orig === p.idx
+      const { marker, text, playing } = this.rowAt(i)
       const isSel = i === this.sel
-      const fav = p.favorites.includes(path)
-      const marker = isPlaying ? "▶" : " "
-      const line = `${marker} ${String(i + 1).padStart(2, " ")} ${name}${fav ? " ♥" : ""}`
+      const line = `${marker} ${text}`
       const box = row.box
       if (isSel) {
         box.backgroundColor = this.theme.surface1
         row.text.content = t`${fg(this.theme.text)(bold(clipWidth(line, 200)))}`
-      } else if (isPlaying) {
+      } else if (playing) {
         box.backgroundColor = this.theme.base
         row.text.content = t`${fg(this.theme.green)(bold(clipWidth(line, 200)))}`
       } else {
@@ -1470,7 +1499,6 @@ export class PlayerUI {
         row.text.content = t`${fg(this.theme.text)(clipWidth(line, 200))}`
       }
     }
-    // 滚动到选中项
     try {
       this.scrollbox.scrollChildIntoView(`pl-${this.sel}`)
     } catch {
@@ -1480,8 +1508,17 @@ export class PlayerUI {
 
   playlistTitle(): string {
     const p = this.p
+    if (this.view === "settings") return ` \uF013 设置 · ↑↓ 选择 · Enter/←→ 调整 · Esc 返回 `
+    if (this.view === "pl") {
+      if (this.plPickerMode && this.plCurrent) return ` 加歌 → ${this.plCurrent} · Enter 加入 · Esc 返回 `
+      if (this.plLevel === "detail" && this.plCurrent) {
+        const c = p.playlistPaths(this.plCurrent).length
+        return ` ${this.plCurrent} · ${c} 首 · Esc 返回 `
+      }
+      return ` 歌单 · 共 ${p.playlists.length} 个 · n 新建 · Enter 进入 `
+    }
     if (this.searchActive) return ` 搜索结果 ${p.queue.length} 首 `
-    if (p.favMode) return ` ♥ 收藏 ${p.queue.length} 首 · F退出 `
+    if (this.view === "fav") return ` \uF004 收藏 ${p.queue.length} 首 · 1 列表 `
     if (this.searchMode) return ` 播放列表 ${p.playlist.length} 首 · 输入中 `
     return ` 播放列表 ${p.playlist.length} 首 `
   }
@@ -1518,13 +1555,15 @@ export class PlayerUI {
       this.eqText.content = t`${fg(this.theme.overlay)("▁ ▁ ▁ ▁ ▁ ▁")}`
     }
 
-    // 头部信息
+    // 头部信息: 视图 + 模式
     const mode =
-      p.isShuffle ? "🔀 随机" :
-      this.searchActive ? "🔍 搜索" :
-      p.favMode ? "♥ 收藏" : "🎵 列表"
+      this.view === "settings" ? "\uF013 设置" :
+      p.isShuffle ? "\uF074 随机" :
+      this.searchActive ? "\uF002 搜索" :
+      this.view === "fav" ? "\uF004 收藏" :
+      this.view === "pl" ? "\uF1C5 歌单" : "\uF001 列表"
     this.headModeText.content = ` ${mode} `
-    const volStr = p.muted ? "🔇 静音" : `音量 ${p.volume}`
+    const volStr = p.muted ? "\uF026 静音" : `音量 ${p.volume}`
     this.headRightText.content =
       ` ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `
 
@@ -1548,7 +1587,7 @@ export class PlayerUI {
         this.statusLeft.fg = this.theme.pink
       } else {
         this.statusLeft.content =
-          "空格 播放/暂停 · n/p 切歌 · f 收藏 · F 收藏模式 · P 歌单 · h 帮助 · s 随机 · m 循环 · t 主题 · / 搜索 · M 静音 · q 退出"
+          "空格 播放/暂停 · n/p 切歌 · f 收藏 · 1/2/3/4 列表/收藏/歌单/设置 · / 搜索 · M 静音 · +/- 音量 · h 帮助 · q 退出"
         this.statusLeft.fg = this.theme.subtext
       }
     }
@@ -1559,7 +1598,7 @@ export class PlayerUI {
     // 淡入淡出
     p.updateFade()
 
-    // duration 兜底: 播放中但仍未知时长时, 每 1 秒主动补拉一次
+    // duration 兜底
     if (p.playing && p.duration <= 0 && this.tickCount % 10 === 0) {
       p.mpv.getProperty<number>("duration").then((d) => {
         if (typeof d === "number" && Number.isFinite(d) && d > 0) p.duration = d
@@ -1573,7 +1612,7 @@ export class PlayerUI {
   /** 更新"正在播放"卡片与进度条 */
   updateNowPlaying() {
     const p = this.p
-    const status = p.playing ? (p.paused ? "⏸ 已暂停" : "▶ 播放中") : "⏹ 待机"
+    const status = p.playing ? (p.paused ? "\uF04C 已暂停" : "\uF04B 播放中") : "\uF04D 待机"
     this.nowStatusText.content = status
     this.nowStatusText.fg = p.playing ? (p.paused ? this.theme.yellow : this.theme.green) : this.theme.subtext
     let title = p.currentTitle()
@@ -1581,7 +1620,6 @@ export class PlayerUI {
     if (artist) title += ` ┊ ${artist}`
     this.nowTitleText.content = title
 
-    // 渐变进度条
     const innerW = (this.timeBox.width || 20) - (this.timeText.width || 18) - 2
     const barw = Math.max(6, Math.min(60, innerW))
     const dur = p.duration
@@ -1594,7 +1632,6 @@ export class PlayerUI {
     const f3 = Math.max(filled - seg - seg, 0)
     const rest = Math.max(barw - filled, 0)
     this.progressText.content = t`${fg(this.theme.sky)("█".repeat(f1))}${fg(this.theme.lavender)("█".repeat(f2))}${fg(this.theme.pink)("█".repeat(f3))}${fg(this.theme.surface1)("░".repeat(rest))}`
-    // 时长未知时显示 --:-- 而非 0:00, 避免误导
     const durText = dur > 0 ? fmt(dur) : "--:--"
     const pctText = dur > 0 ? String(Math.round(pct * 100)).padStart(3) : "---"
     this.timeText.content = ` ${fmt(tpos)} / ${durText}  ${pctText}% `
@@ -1616,7 +1653,6 @@ export class PlayerUI {
       }
       return
     }
-    // 当前句
     let cur = -1
     for (let i = 0; i < p.lyrics.length; i++) {
       if (p.lyrics[i].time <= p.timePos) cur = i
@@ -1631,7 +1667,7 @@ export class PlayerUI {
       if (lineIdx >= 0 && lineIdx < p.lyrics.length) {
         const txt = clipWidth(p.lyrics[lineIdx].text, (this.lyricInner.width || 40) - 4)
         if (r === center) {
-          row.content = t`${fg(this.theme.sky)(bold("♪ " + txt))}`
+          row.content = t`${fg(this.theme.sky)(bold("\uF001 " + txt))}`
         } else {
           const dist = Math.abs(r - center)
           const col = dist <= 1 ? this.theme.subtext : this.theme.overlay
@@ -1663,8 +1699,7 @@ export class PlayerUI {
   private updateFullLyrics() {
     const p = this.p
     const title = p.currentTitle()
-    this.fullTitle.content = ` ${p.playing ? (p.paused ? "❚❚" : "▶") : "⏹"} ${title} `
-    // 进度
+    this.fullTitle.content = ` ${p.playing ? (p.paused ? "\uF04C" : "\uF04B") : "⏹"} ${title} `
     const dur = p.duration
     const tpos = p.timePos
     const pct = dur > 0 ? Math.max(0, Math.min(1, tpos / dur)) : 0
@@ -1687,14 +1722,13 @@ export class PlayerUI {
       else break
     }
     if (cur < 0) cur = 0
-    const MID = Math.floor(this.fullLyricRows.length / 2) // 3 (7 行)
+    const MID = Math.floor(this.fullLyricRows.length / 2)
     for (let r = 0; r < this.fullLyricRows.length; r++) {
       const offset = r - MID
       const idx = cur + offset
       const row = this.fullLyricRows[r]
       if (offset === 0) {
-        // 当前句: 放大加粗 + 亮色
-        row.content = t`${fg(this.theme.sky)(bold("♪     " + p.lyrics[cur].text))}`
+        row.content = t`${fg(this.theme.sky)(bold("\uF001     " + p.lyrics[cur].text))}`
       } else if (idx >= 0 && idx < p.lyrics.length) {
         const col = Math.abs(offset) <= 1 ? this.theme.subtext : this.theme.overlay
         row.content = t`${fg(col)("      " + p.lyrics[idx].text)}`

@@ -5,17 +5,23 @@
  * 覆盖:
  *  1. P 键打开歌单列表
  *  2. n 新建歌单 (弹层输入名)
- *  3. Enter 进入歌单详情
+ *  3. Enter 进入歌单详情 (并验证 plMode 正确关闭 — 修复 Enter 弹回 bug)
  *  4. a 进入加歌选歌模式, Enter 把选中歌加入歌单
- *  5. 详情页 Enter 播放 / x 移除歌曲
+ *  4.5 歌单内播放: 详情页 Enter 应播所选曲, 不弹回第一首
+ *  5. x 移除歌曲
  *  6. r 重命名 / d 删除歌单
  *  7. Esc 逐级返回
- *  8. 持久化: playlists.toml 落盘内容正确
+ *  8. 持久化: 临时 playlists.toml 落盘内容正确
+ *
+ * 数据隔离: 第一条副作用 import 把歌单文件指向进程专属临时路径,
+ * 全程绝不读写用户真实的 ~/.config/lxmusic/playlists.toml。
  */
-import { existsSync, readFileSync, rmSync, writeFileSync } from "fs"
+// 必须第一条: 设好 env 后, 下面的 player→playlists 静态 import 才会读到临时路径
+import { TEST_PLAYLISTS_FILE } from "./playlist-test-env.ts"
+import { existsSync, readFileSync, rmSync } from "fs"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Player } from "./src/player"
-import { PlayerUI, type PlayerUI as PlayerUIType } from "./src/ui"
+import { PlayerUI } from "./src/ui"
 import { PLAYLISTS_FILE } from "./src/playlists"
 import type { MpvClient, MpvEvent } from "./src/mpv"
 
@@ -43,26 +49,8 @@ const fakeMpv = {
   connected: true,
 } as unknown as MpvClient
 
-// ---------- 现场保护: 备份用户真实歌单文件 ----------
-const hadFile = existsSync(PLAYLISTS_FILE)
-const backup = hadFile ? readFileSync(PLAYLISTS_FILE, "utf-8") : ""
-
-// ---------- 测试中用到的私有节点 — 用已知形状的窄类型读取 ----------
-function overlayVisible(ui: PlayerUIType, overlay: "plListOverlay" | "plDetailOverlay" | "plDialogOverlay"): boolean {
-  const node = (ui as unknown as Record<string, { visible?: boolean }>)[overlay]
-  return node?.visible === true
-}
-function textOf(ui: PlayerUIType, ref: "plListTitle" | "plDetailTitle"): string {
-  const node = (ui as unknown as Record<string, { content?: unknown }>)[ref]
-  const c = node?.content
-  if (typeof c === "string") return c
-  // TextRenderable.content 可能是 StyledText chunk 对象 { chunks: [{ text }] }
-  if (c && typeof c === "object" && "chunks" in c) {
-    const chunks = (c as { chunks: Array<{ text?: string }> }).chunks
-    return chunks.map((x) => x.text ?? "").join("")
-  }
-  return ""
-}
+// ---------- 确认隔离生效 ----------
+check("歌单文件已隔离到临时路径", PLAYLISTS_FILE === TEST_PLAYLISTS_FILE)
 
 // ---------- 准备 ----------
 const TRACKS = [
@@ -83,13 +71,17 @@ await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
 
+// 渲染快照里是否含某文本 — 用公开渲染结果替代对私有节点的强转读取
+function frameHas(substr: string): boolean {
+  return setup.captureCharFrame().includes(substr)
+}
+
 // ---------- 1. P 键打开歌单列表 ----------
 setup.mockInput.pressKey("P")
 await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
-check("P 键打开歌单列表 (plMode)", ui.plMode === true)
-check("歌单列表覆盖层可见", overlayVisible(ui, "plListOverlay"))
+check("P 键打开歌单列表 (view=pl)", ui.view === "pl" && ui.plLevel === "list")
 console.log("================ 歌单列表 (空) ================")
 console.log(setup.captureCharFrame())
 
@@ -97,7 +89,7 @@ console.log(setup.captureCharFrame())
 setup.mockInput.pressKey("n")
 await setup.renderOnce()
 check("弹出新建弹层 (plDialogMode=new)", ui.plDialogMode === "new")
-check("弹层可见", overlayVisible(ui, "plDialogOverlay"))
+check("弹层已渲染", frameHas("新建歌单"))
 await setup.renderOnce()
 setup.mockInput.typeText("我的最爱")
 await setup.renderOnce()
@@ -110,13 +102,13 @@ check("歌单已创建", p.playlists.length === 1 && p.playlists[0].name === "�
 console.log("================ 歌单列表 (已创建) ================")
 console.log(setup.captureCharFrame())
 
-// ---------- 3. Enter 进入详情 (空歌单) ----------
+// ---------- 3. Enter 进入详情 (空歌单) — 同时验证 plMode 被关闭 ----------
 setup.mockInput.pressEnter()
 await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
-check("进入歌单详情 (plDetailMode)", ui.plDetailMode === true)
-check("详情标题含有歌单名", textOf(ui, "plDetailTitle").includes("我的最爱"))
+check("进入歌单详情 (plLevel=detail)", ui.view === "pl" && ui.plLevel === "detail")
+check("详情态仍留在歌单视图 (view=pl)", ui.view === "pl")
 console.log("================ 歌单详情 (空) ================")
 console.log(setup.captureCharFrame())
 
@@ -126,7 +118,7 @@ await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
 check("进入加歌选歌模式 (plPickerMode)", ui.plPickerMode === true)
-check("详情层已关闭", overlayVisible(ui, "plDetailOverlay") === false)
+check("仍留歌单详情 (plLevel=detail)", ui.view === "pl" && ui.plLevel === "detail")
 // 选中第 2 首 (雾里), 按 Enter 加入
 setup.mockInput.pressKey("ARROW_DOWN")
 await setup.renderOnce()
@@ -146,18 +138,35 @@ setup.mockInput.pressEscape()
 await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
-check("Esc 退出选歌模式回详情", ui.plPickerMode === false && ui.plDetailMode === true)
+check("Esc 退出选歌模式回详情", ui.plPickerMode === false && ui.view === "pl" && ui.plLevel === "detail")
 console.log("================ 歌单详情 (2 首) ================")
 console.log(setup.captureCharFrame())
 
-// ---------- 5. x 移除歌曲 (移除第 2 首 = 平凡之路) ----------
+// ---------- 4.5 歌单内播放: 详情页选第 2 首 Enter, 不应弹回第 1 首 ----------
 setup.mockInput.pressKey("ARROW_DOWN")  // 选到第 2 首 (平凡之路)
 await setup.renderOnce()
-setup.mockInput.pressKey("x")
+setup.mockInput.pressEnter()            // 播放 → 关闭详情, 主视图 sel 对齐到该曲
+await Bun.sleep(30)  // 等 playIndex 异步链 (.then 里 setView 退列表) 完成
 await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
-check("移除后只剩 1 首", p.playlists[0].paths.length === 1 && p.playlists[0].paths[0] === TRACKS[1])
+check("详情页 Enter 后退回列表视图", ui.view === "list")
+check("主视图 sel 对齐到实际播放曲的 playlist 索引", ui.sel === p.playlist.indexOf(TRACKS[2]))
+check("正在播放的是所选第 2 首 (未弹回)", p.currentPath === TRACKS[2])
+
+// ---------- 5. x 移除歌曲 (重新进详情, 移除第 1 首 = 雾里) ----------
+setup.mockInput.pressKey("P")
+await setup.renderOnce()
+setup.mockInput.pressEnter()  // 进详情
+await setup.renderOnce()
+ui.tick()
+await setup.renderOnce()
+check("重新进入详情 sel=0", ui.view === "pl" && ui.plLevel === "detail" && ui.sel === 0)
+setup.mockInput.pressKey("x")  // 移除第 1 首 (雾里)
+await setup.renderOnce()
+ui.tick()
+await setup.renderOnce()
+check("移除后只剩 1 首", p.playlists[0].paths.length === 1 && p.playlists[0].paths[0] === TRACKS[2])
 
 // ---------- 6. r 重命名 ----------
 setup.mockInput.pressEscape()  // 回歌单列表
@@ -177,8 +186,8 @@ console.log(setup.captureCharFrame())
 
 // ---------- 7. 持久化验证 ----------
 const onDisk = existsSync(PLAYLISTS_FILE) ? readFileSync(PLAYLISTS_FILE, "utf-8") : ""
-check("歌单已写入 playlists.toml", onDisk.includes("夜跑专用"))
-check("歌词路径正确写入", onDisk.includes(TRACKS[1]))
+check("歌单已写入临时 playlists.toml", onDisk.includes("夜跑专用"))
+check("歌曲路径正确写入", onDisk.includes(TRACKS[2]))
 
 // ---------- 8. d 删除歌单 ----------
 setup.mockInput.pressKey("d")
@@ -186,7 +195,7 @@ await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
 check("歌单已删除", p.playlists.length === 0)
-check("列表显示为空", textOf(ui, "plListTitle").includes("0"))
+check("列表显示为空", frameHas("共 0 个"))
 console.log("================ 删除后歌单列表 ================")
 console.log(setup.captureCharFrame())
 
@@ -195,14 +204,10 @@ setup.mockInput.pressEscape()
 await setup.renderOnce()
 ui.tick()
 await setup.renderOnce()
-check("Esc 关闭歌单列表 (plMode=false)", ui.plMode === false)
+check("Esc 关闭歌单列表 (view=list)", ui.view === "list")
 
-// ---------- 10. 全部删除后磁盘文件还原 ----------
-if (hadFile) {
-  writeFileSync(PLAYLISTS_FILE, backup)
-} else {
-  try { rmSync(PLAYLISTS_FILE, { force: true }) } catch { /* ignore */ }
-}
+// ---------- 10. 清理临时文件 ----------
+try { rmSync(TEST_PLAYLISTS_FILE, { force: true }) } catch { /* ignore */ }
 
 setup.renderer.destroy()
 if (failures > 0) {

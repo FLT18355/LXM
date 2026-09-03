@@ -19,7 +19,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { join } from "path"
 import { CONFIG_DIR } from "./config"
 
-export const PLAYLISTS_FILE = join(CONFIG_DIR, "playlists.toml")
+// 测试可用 LXM_PLAYLISTS_FILE 指向临时文件, 避免读写污染用户真实歌单
+export const PLAYLISTS_FILE = process.env["LXM_PLAYLISTS_FILE"] || join(CONFIG_DIR, "playlists.toml")
 
 export type Playlist = {
   /** 唯一名, 也作为显示标题; 重命名时直接改这个 */

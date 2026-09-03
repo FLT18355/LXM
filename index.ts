@@ -6,7 +6,7 @@
  *   bun index.ts [音乐目录]                # 启动播放器
  *   bun index.ts config --music-directory /xxx/xx   # 配置音乐目录
  */
-import { existsSync, rmSync } from "fs"
+import { existsSync, rmSync, statSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 import { createCliRenderer } from "@opentui/core"
@@ -20,7 +20,7 @@ import { parseThemeName } from "./src/theme"
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: r-0.1
+版本: r-0.2
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -30,10 +30,10 @@ const HELP = `
 快捷键:
   空格/Enter  播放/暂停/播放选中   n/p  下一首/上一首
   ←/→  ±5秒   [/]  ±10秒          r/a  减速/加速
-  +/-  音量   ↑↓/jk  选择          s  随机
-  m  循环模式   /  搜索(支持中文)   f/F  收藏
-  l/L  歌词开关/全屏歌词 (KTV)     d  重新扫描目录
-  P    歌单列表 (n 新建/ r 重命名/ d 删除/ Enter 进入/ a 加歌/ x 移除)
+  +/- 音量 (自动保存) ^v/jk 选择 s 随机
+  m 循环模式 / 搜索(支持中文) f/F 收藏
+  l/L 歌词开关/全屏歌词 (KTV) d 重新扫描目录
+  1/2/3/4 切换视图: 列表/收藏/歌单/设置 h 帮助 q/Esc 退出
   h  帮助   q/Esc  退出
   M/0  静音
 `
@@ -81,7 +81,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("r-0.1")
+    console.log("r-0.2")
     return
   }
   let dirArg: string | undefined
@@ -96,8 +96,8 @@ async function main() {
   const cfg = loadConfig()
   const musicDir = resolve(dirArg || (cfg["music_directory"] as string) || join(process.env.HOME || "~", "Music"))
   try {
-    const st = await Bun.spawn(["test", "-d", musicDir]).exited
-    if (st !== 0) throw new Error("not a dir")
+    // statSync 免掉一次 Bun.spawn (本机 fork/exec 极慢, 省 3-4s)
+    if (!statSync(musicDir).isDirectory()) throw new Error("not a dir")
   } catch {
     console.log(`目录不存在喵: ${musicDir}`)
     console.log("可用 bun index.ts config --music-directory /xxx/xx 配置")
@@ -113,8 +113,9 @@ async function main() {
 
   // ---------- 启动 mpv ----------
   const socketPath = join(tmpdir(), `lanxi_mpv_${process.pid}.sock`)
+  // rmSync force 直接忽略不存在, 免掉 existsSync + 一次 spawnSync (本机 fork/exec 极慢)
   try {
-    if (existsSync(socketPath)) Bun.spawnSync(["rm", "-f", socketPath])
+    rmSync(socketPath, { force: true })
   } catch {
     /* ignore */
   }
@@ -193,6 +194,9 @@ async function main() {
   player.musicDir = musicDir
   player.playlist = playlist
   player.queue = playlist.map((_, i) => i)
+  // 音量: 从配置恢复 (mpv 淡入以 player.volume 为目标)
+  const savedVol = Number(cfg["volume"])
+  if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol
 
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
 
