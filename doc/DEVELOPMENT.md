@@ -29,11 +29,12 @@ tests/
   theme-test.ts          主题循环切换
   regress-test.ts        回归: end-file 切歌链防多米诺
   regress2-test.ts       回归: 搜索/收藏模式下切歌
+  loop-test.ts           回归: 单曲循环走 set_property loop-file, loadfile 不传 options
 doc/                    本文档
 build-portable.sh   可分发目录构建脚本 (bun run build:portable)
 ```
 
-运行: `bun index.ts [音乐目录]`。测试: `bun run test` (package.json 链式跑 5 个;
+运行: `bun index.ts [音乐目录]`。测试: `bun run test` (package.json 链式跑 6 个;
 `bun test` 原生 runner **不识别** `*-test.ts` 命名, 不要改用)。
 
 编译单文件二进制: `bun run build` → `dist/lxm-tui` (`bun build --compile
@@ -79,6 +80,12 @@ strip-ansi, emoji-regex) + `lxm.sh` 启动器。此方案 UPX 安全 (运行时�
   - `property-change duration/pause` → 对应字段。
   - `file-loaded` → `p.onFileLoaded()` (解除 end-file 抑制 + 补拉 duration)。
   - `end-file` 且 reason ∈ {eof, stop} 且 `!suppressEndFile` → `p.maybeAdvance()` 自动切歌。
+  - `loop-file` 属性: 单曲循环 = `set_property("loop-file","inf")`。**mpv ≥ 0.35 的
+    `loadfile` 命令已删除位置 options 参数** (`loadfile URL MODE --opt=val` /
+    数组 / 对象形式全部 `invalid parameter`, v0.41 实测), 任何文件加载参数必须走
+    `set_property`。`loop-file` 是持久属性, 跨 `loadfile` 保持; `maybeAdvance` 的
+    ONE 分支 (playIndex 同索引重载) 是兜底路径, 正常时 loop-file 生效 mpv 无缝
+    循环不发 end-file。
 
 ## 4. Player 核心模型 (src/player.ts)
 
@@ -227,13 +234,15 @@ F07C 目录已切换。**禁止引入 emoji**; 方向键 ←→↑↓ 与进度�
 | InputRenderable 宽度动态改 | plDialog 输入框 set-dir 模式加宽到 70, closePlDialog 恢复 40 |
 | LRC 空行渲染 | 歌词文件自带空文本时间戳, 播放器忠实显示, 非 bug |
 | UPX 压单文件产物后报 `SyntaxError: Invalid character: '\0'` | 勿 UPX `dist/lxm-tui`! bun --compile 把模块图作为**未压缩** trailer 追加在 ELF 尾部, 运行时经 /proc/self/exe 从磁盘原文件按偏移读取; UPX 只解内存镜像不改磁盘文件 → trailer 读坏 (`--overlay=copy` 也救不了: OpenTUI native worker 偏移同样错位)。要压缩用 `bun run build:portable` → `dist-js/` (~67MB): 运行时外置成独立 bun 可执行再 UPX (实测官方 bun 压完可用), 配 `lxm.sh` 薄壳启动器。`upx -d` 可还原单文件版; `--strip` 无体积效果; `libopentui.so` 压不了 (缺 DT_INIT) |
+| `loadfile` 传 options 参数报 `invalid parameter` (mpv ≥ 0.35) | 位置形式 (`--loop-file=inf`)、数组、对象全部被拒, 单曲循环卡死。文件级参数一律 `set_property`, 见 §3 |
 
 ## 10. 验证清单 (每次改动后)
 
 ```bash
 bunx tsc --noEmit    # 必须干净 (TS5097 扩展名告警可忽略)
-bun run test         # 5 个测试全绿
+bun run test         # 6 个测试全绿
 bun index.ts -v      # 版本号与 package.json 一致
 ```
 
 交互面改动无法无头覆盖时, 明确告知用户需真机验证, 不要谎称已验证。
+源码改动后必须 `bun run build:portable` 重建 dist-js/ 产物, 否则分发版仍是旧行为。

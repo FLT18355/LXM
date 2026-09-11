@@ -80,9 +80,8 @@ export class Player {
       this.suppressTimer = null
     }, 2000)
     await this.loadLyrics(path)
-    const opts: Record<string, string | number> = {}
-    if (this.repeat === "ONE") opts["loop-file"] = "inf"
-    await this.mpv.loadfile(path, "replace", opts)
+    await this.mpv.loadfile(path, "replace")
+    await this.mpv.setProperty("loop-file", this.repeat === "ONE" ? "inf" : "no")
     await this.mpv.setProperty("speed", this.speed)
     this.playing = true
     this.paused = false
@@ -173,6 +172,8 @@ export class Player {
   cycleRepeat(): void {
     const i = REPEAT_CYCLE.indexOf(this.repeat)
     this.repeat = REPEAT_CYCLE[(i + 1) % REPEAT_CYCLE.length]
+    // 即时应用到 mpv: 单曲循环靠 loop-file 属性 (切换时无需等下一首)
+    this.mpv.setProperty("loop-file", this.repeat === "ONE" ? "inf" : "no")
   }
 
   // ---------- 收藏 ----------

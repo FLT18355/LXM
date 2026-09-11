@@ -139,11 +139,8 @@ export class MpvClient {
 
   // ---------- 便捷封装 ----------
 
-  loadfile(path: string, mode: "replace" | "append" = "replace", opts: Record<string, string | number> = {}) {
-    const extra = Object.entries(opts)
-      .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `--${k}=${v}`)
-    return this.command("loadfile", path, mode, ...(extra as unknown[]))
+  loadfile(path: string, mode: "replace" | "append" = "replace") {
+    return this.command("loadfile", path, mode)
   }
 
   setProperty(name: string, value: unknown) {
