@@ -55,7 +55,7 @@ export function loadConfig(): Record<string, unknown> {
   }
 }
 
-function tomlValue(v: unknown): string {
+export function tomlValue(v: unknown): string {
   if (typeof v === "boolean") return v ? "true" : "false"
   if (typeof v === "number") return String(v)
   if (Array.isArray(v))
@@ -63,16 +63,15 @@ function tomlValue(v: unknown): string {
   return `"${String(v).replace(/"/g, '\\"')}"`
 }
 
-/** 将配置写入文件 (与现有配置合并) */
-export function saveConfig(patch: Record<string, unknown>): void {
+/** 整份覆盖写配置 (含固定头), 供 saveConfig 与迁移清理复用 */
+export function writeConfig(data: Record<string, unknown>): void {
   try {
     if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
   } catch {
     /* ignore */
   }
-  const merged = { ...loadConfig(), ...patch }
   const lines = [DEFAULT_HEADER, ""]
-  for (const [k, v] of Object.entries(merged)) {
+  for (const [k, v] of Object.entries(data)) {
     lines.push(`${k} = ${tomlValue(v)}`)
   }
   try {
@@ -80,4 +79,9 @@ export function saveConfig(patch: Record<string, unknown>): void {
   } catch {
     /* ignore */
   }
+}
+
+/** 将配置写入文件 (与现有配置合并) */
+export function saveConfig(patch: Record<string, unknown>): void {
+  writeConfig({ ...loadConfig(), ...patch })
 }

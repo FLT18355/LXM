@@ -4,6 +4,7 @@
 import { readdir } from "fs/promises"
 import type { Dirent } from "fs"
 import { extname, join, basename, dirname, sep } from "path"
+import { loadScanCache, saveScanCache } from "./cache"
 
 export const AUDIO_EXTS = new Set([
   ".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac",
@@ -35,6 +36,15 @@ export async function scanDirectory(root: string): Promise<string[]> {
 
 export function baseName(p: string): string {
   return basename(p)
+}
+
+/** 带缓存的目录扫描: 目录 mtime 未变时直接复用缓存, 否则全量扫描并更新缓存 */
+export async function scanDirectoryCached(root: string): Promise<string[]> {
+  const cached = loadScanCache(root)
+  if (cached) return cached
+  const files = await scanDirectory(root)
+  saveScanCache(root, files)
+  return files
 }
 
 /** 去掉扩展名的名字 (用作默认歌名) */

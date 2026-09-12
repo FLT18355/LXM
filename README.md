@@ -12,9 +12,11 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm
 -  收藏：`f` 收藏当前曲，列表区四视图 tab（`1` 播放列表 / `2` 收藏 / `3` 歌单 / `4` 设置）
 -  歌单管理：创建 / 重命名 / 删除歌单，进入歌单详情，选歌加入 / 移除，独立持久化为 `playlists.toml`（`3` 或 `P` 进入）
 -  设置视图（`4`）：主题（Catppuccin 四口味）· 音量· 倍速（均自动保存）· 音乐目录（输入路径即时重扫）
--  断点续播：退出记住歌曲与位置，重开自动续播
+-  断点续播：退出记住歌曲与位置，重开自动续播（状态存 `~/.cache/lxmusic/state.toml`）
   -  切歌淡入淡出（渐弱 → 渐强）
   -  静音切换（M 或 0）· 进度条鼠标点击/拖动定位
+-  缓存目录 `~/.cache/lxmusic/`：断点续播状态 + 音乐目录扫描缓存（启动加速，mtime 校验自动失效）
+  - `bun index.ts cache` 查看 / `bun index.ts cache --clear` 清空 · 设置视图（`4`）缓存行 Enter 清空
 -  Catppuccin Latte 配色 + 渐变进度条 + 伪频谱等化器
 -  鼠标点击 tab 切换视图 · 点击播放列表行直接播放
 
@@ -28,9 +30,12 @@ bun index.ts /path/to/music        # 指定目录
 bun index.ts -v / --version        # 显示版本
 bun index.ts config                # 查看当前配置
 bun index.ts config --music-directory /path/to/music   # 设置音乐目录
+bun index.ts cache                 # 查看缓存目录 (断点续播状态 + 扫描缓存)
+bun index.ts cache --clear         # 清空缓存
 ```
 
-配置保存在 `~/.config/lxmusic/config.toml`（与 Python 版兼容，可混用）。
+配置保存在 `~/.config/lxmusic/config.toml`（与 Python 版兼容，可混用）；
+缓存与运行时状态在 `~/.cache/lxmusic/`（可随时清空，不影响配置）。
 
 ## 编译为二进制
 
@@ -67,7 +72,7 @@ bun run build:portable  # → dist-js/ (可分发目录 ~67MB, 运行时外置)
 | P | 进入歌单视图 (= 3) | q / Esc | 退出 / 逐级返回 |
 | 歌单视图内 | n / r / d | 新建 / 重命名 / 删除歌单 |
 | 歌单详情内 | Enter / a / x | 播放 / 加歌 / 移除 |
-| 设置视图内 | Enter 或 ←/→ | 主题=切换 · 音量=±5 · 倍速=±0.25 · 目录=弹层输入路径 |
+| 设置视图内 | Enter 或 ←/→ | 主题=切换 · 音量=±5 · 倍速=±0.25 · 目录=弹层输入路径 · 缓存=Enter 清空 |
 
 
 ## 开发
@@ -82,6 +87,8 @@ bun tests/theme-test.ts    # 主题切换测试
 bun tests/playlist-test.ts # 歌单功能测试 (数据隔离到临时文件)
 bun tests/regress-test.ts  # 回归测试 (end-file 切歌链防多米诺)
 bun tests/regress2-test.ts # 回归测试 (搜索/收藏模式下切歌)
+bun tests/loop-test.ts     # 回归测试 (单曲循环 loop-file)
+bun tests/cache-test.ts    # 回归测试 (缓存目录读写 / mtime 校验)
 ```
 
 ## 结构
@@ -89,7 +96,8 @@ bun tests/regress2-test.ts # 回归测试 (搜索/收藏模式下切歌)
 ```
 index.ts          入口: 参数 / mpv 启动 / renderer / 主循环 / 清理
 src/config.ts     配置读写 (TOML, 兼容 Python 版)
-src/scanner.ts    音乐目录递归扫描
+src/cache.ts      缓存目录 ~/.cache/lxmusic/ (断点续播状态 + 扫描缓存)
+src/scanner.ts    音乐目录递归扫描 (带缓存加速)
 src/lrc.ts        LRC 歌词解析
 src/mpv.ts        mpv JSON IPC 客户端 (Bun unix socket, 事件驱动)
 src/player.ts     播放器状态与逻辑

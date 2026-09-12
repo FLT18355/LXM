@@ -4,6 +4,7 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
+import { saveState as saveCacheState } from "./cache"
 import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
 import type { MpvClient } from "./mpv"
 
@@ -288,12 +289,12 @@ export class Player {
   // ---------- 状态保存 ----------
 
   saveState(): void {
-    const patch: Record<string, unknown> = {}
     if (this.currentPath) {
-      patch["last_path"] = this.currentPath
-      patch["last_pos"] = this.playing ? Math.round(this.timePos * 10) / 10 : 0
+      saveCacheState({
+        last_path: this.currentPath,
+        last_pos: this.playing ? Math.round(this.timePos * 10) / 10 : 0,
+      })
     }
-    saveConfig(patch)
   }
 
   // ---------- 显示信息 ----------

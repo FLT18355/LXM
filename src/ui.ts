@@ -4,7 +4,29 @@
  * 列表区四视图 tab: 播放列表 / 收藏 / 歌单 / 设置 (1/2/3/4 或鼠标点击切换)
  * 歌单 tab 内二级: 歌单列表 → 某歌单详情 (Enter 进入, Esc 返回)
  * 歌单详情内 a 进入"加歌选歌"模式 (Enter 加入, Esc 返回)
- * 设置 tab: 主题 (←/→ 或 Enter 循环) / 音量 (←/→ ±5, 持久化) / 音乐目录 (Enter 弹层输入路径)
+ * 设置 tab: 主题 / 音量 / 倍速 / 音乐目录 / 缓存
+ *
+ * ── 区块导航 (改码用行号精准读取, 别整读 1750 行) ──
+ *  63 类声明 + 状态字段
+ * 126 constructor       142 buildTree            (组件树构建, ~350 行)
+ * 490 attachGlobalKeys  495 attachInputEvents   505 attachDialogEvents
+ * 514 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
+ * 550 handleKey         (按键路由, 见 doc/ui.md)
+ * 810 setView           853 updateTabBar        867 flash
+ * 873 listCount         889 moveSel             897 playSel
+ * 921 playIndex         925 afterTrackChange    930 seek
+ * 935 seekFromMouse     947 favCurrent
+ * 963 settingEnter      977 settingAdjust       1001 applyMusicDir
+ * 1022 enterSearch      1033 doSearch           1064 exitSearch
+ * 1097 refreshDir       1109 applyTheme         1167 cycleTheme  1175 quit
+ * 1184 openPlDetail     1192 closePlDetail      1200 openPlDialog
+ * 1221 closePlDialog    1232 commitPlDialog     1274 plEnter
+ * 1309 plDelete         1332 enterPlPicker      1341 plPickerAdd
+ * 1355 plPickerExit     1362 setFullLyrics      1371 rebuildPlaylistRows
+ * 1402 onRowClick       1436 rowAt              1489 updatePlaylist
+ * 1517 playlistTitle    1537 tick               (渲染管线, 见 doc/ui.md)
+ * 1621 updateNowPlaying 1649 updateLyrics       1693 buildLyricRows
+ * 1709 updateFullLyrics
  */
 import {
   BoxRenderable,
@@ -25,6 +47,7 @@ import { resolve } from "path"
 import { Player, REPEAT_CYCLE } from "./player"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
 import { loadConfig, saveConfig } from "./config"
+import { CACHE_DIR, clearCache, ensureCacheDir } from "./cache"
 import type { MpvEvent } from "./mpv"
 
 const REPEAT_LABEL: Record<string, string> = {
@@ -871,7 +894,7 @@ export class PlayerUI {
   /** 当前视图的行数 */
   private listCount(): number {
     const p = this.p
-    if (this.view === "settings") return 4
+    if (this.view === "settings") return 5
     if (this.view === "pl") {
       if (this.plLevel === "list") return p.playlists.length
       // detail: plCurrent 的歌曲; picker: 全库
@@ -958,10 +981,16 @@ export class PlayerUI {
 
   // ---------- 设置视图 ----------
 
-  /** 设置项 Enter: 0 主题循环 / 3 改目录弹层 */
+  /** 设置项 Enter: 0 主题 / 3 改目录 / 4 缓存清空 */
   settingEnter() {
     if (this.sel === 0) this.cycleTheme()
     else if (this.sel === 3) this.openPlDialog("set-dir", this.p.musicDir)
+    else if (this.sel === 4) {
+      const n = clearCache()
+      ensureCacheDir()
+      this.flash(`已清空缓存 (${n} 项) 喵~`, 2.2)
+      this.updatePlaylist()
+    }
     else if (this.sel === 2) this.flash("用 ←/→ 调整倍速喵~ (步进 0.25, 自动保存)")
     else this.flash("用 ←/→ 或 +/- 调整音量喵~ (自动保存)")
   }
@@ -987,7 +1016,7 @@ export class PlayerUI {
         this.flash(`倍速 ${p.speed.toFixed(2)}x (已保存)`)
         this.updatePlaylist()
       })
-    }
+    } else if (this.sel === 4) this.flash("Enter 清空缓存喵~")
   }
 
   /** 改音乐目录: 校验 + 持久化 + 重扫 */
@@ -1438,6 +1467,7 @@ export class PlayerUI {
         `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
         `倍速        ${p.speed.toFixed(2)}x  (←/→ 步进 0.25, 0.25x~4x, 自动保存)`,
         `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
+        `缓存目录    ${clipWidth(CACHE_DIR, 90)}  (Enter 查看/清空)`,
       ]
       return { marker: " ", text: rows[i] || "", playing: false }
     }

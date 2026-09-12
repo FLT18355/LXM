@@ -10,12 +10,13 @@ import { existsSync, rmSync, statSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 import { createCliRenderer } from "@opentui/core"
-import { CONFIG_FILE, loadConfig, saveConfig } from "./src/config"
-import { scanDirectory } from "./src/scanner"
+import { CONFIG_FILE, loadConfig, saveConfig, writeConfig } from "./src/config"
+import { scanDirectory, scanDirectoryCached } from "./src/scanner"
 import { MpvClient, waitForSocket } from "./src/mpv"
 import { Player } from "./src/player"
 import { PlayerUI } from "./src/ui"
 import { parseThemeName } from "./src/theme"
+import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, loadState, ensureCacheDir, clearCache, cacheSize } from "./src/cache"
 
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
@@ -25,6 +26,7 @@ const HELP = `
 用法:
   bun index.ts [音乐目录]                        启动播放器
   bun index.ts config [--music-directory DIR]   配置/查看音乐目录
+  bun index.ts cache [--clear]                  查看/清空缓存目录
   bun index.ts -v | --version                   显示版本
 
 快捷键:
@@ -70,10 +72,34 @@ async function handleConfig(args: string[]): Promise<void> {
   }
 }
 
+async function handleCache(args: string[]): Promise<void> {
+  if (args.includes("--clear")) {
+    const n = clearCache()
+    console.log(`已清空缓存目录喵~ 删除 ${n} 个文件/子目录`)
+    console.log(`  缓存目录: ${CACHE_DIR}`)
+    return
+  }
+  const size = cacheSize()
+  const kb = size > 0 ? (size / 1024).toFixed(1) : "0"
+  const mb = size > 0 ? (size / 1024 / 1024).toFixed(2) : "0"
+  const sizeStr = size >= 1024 * 1024 ? `${mb} MB` : `${kb} KB`
+  console.log(`缓存目录: ${CACHE_DIR}`)
+  console.log(`  占用: ${sizeStr} (${size} 字节)`)
+  const stateExists = existsSync(STATE_FILE)
+  const scanExists = existsSync(SCAN_CACHE_FILE)
+  console.log(`  state.toml (断点续播):    ${stateExists ? "存在" : "无"}`)
+  console.log(`  scan-cache.toml (扫描缓存): ${scanExists ? "存在" : "无"}`)
+  console.log("清空: bun index.ts cache --clear")
+}
+
 async function main() {
   const argv = Bun.argv.slice(2)
   if (argv[0] === "config") {
     await handleConfig(argv.slice(1))
+    return
+  }
+  if (argv[0] === "cache") {
+    await handleCache(argv.slice(1))
     return
   }
   if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
@@ -103,8 +129,9 @@ async function main() {
     console.log("可用 bun index.ts config --music-directory /xxx/xx 配置")
     process.exit(1)
   }
+  ensureCacheDir()
 
-  const playlist = await scanDirectory(musicDir)
+  const playlist = await scanDirectoryCached(musicDir)
   if (!playlist.length) {
     console.log(`在 ${musicDir} 中没找到音频文件喵~`)
     process.exit(1)
@@ -203,10 +230,12 @@ async function main() {
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
 
   // ---------- 恢复断点续播 ----------
+  // 优先读缓存 state.toml; 兼容旧版 config.toml 的 last_path/last_pos (一次性迁移到缓存)
   player.favorites = Array.isArray(cfg["favorites"]) ? (cfg["favorites"] as string[]) : []
   player.loadPlaylists()
-  const lastPath = cfg["last_path"] as string | undefined
-  const lastPos = Number(cfg["last_pos"] || 0)
+  const st = loadState()
+  let lastPath = st.last_path ?? (cfg["last_path"] as string | undefined)
+  let lastPos = Number(st.last_pos ?? cfg["last_pos"] ?? 0)
   if (lastPath) {
     const idx = playlist.indexOf(lastPath)
     if (idx !== -1) {
@@ -215,6 +244,11 @@ async function main() {
       await player.playIndex(idx)
       if (lastPos > 0) player.pendingSeek = lastPos
     }
+  }
+  // 迁移: 把旧 config 里的 last_path/last_pos 清掉 (它们已属于缓存)
+  if (cfg["last_path"] !== undefined || cfg["last_pos"] !== undefined) {
+    const { last_path: _, last_pos: __, ...rest } = cfg
+    writeConfig(rest)
   }
 
   ui.onQuit = () => {
