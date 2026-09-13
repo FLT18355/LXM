@@ -33,6 +33,7 @@ function emit(ev: MpvEvent) {
 // ---------- 准备 ----------
 const setup = await createTestRenderer({ width: 100, height: 36, kittyKeyboard: true })
 const p = new Player(fakeMpv)
+p.mpvReady = true // 延迟启动: 测试直连, 视为已就绪
 p.playlist = [
   "/home/flt18355/音乐/稻香.mp3",
   "/home/flt18355/音乐/绿色-陈雪凝.mp3",

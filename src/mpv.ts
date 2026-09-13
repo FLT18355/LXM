@@ -20,6 +20,8 @@ export class MpvClient {
   private pending = new Map<number, { resolve: (r: MpvResponse | null) => void; timer: ReturnType<typeof setTimeout> }>()
   private buf = ""
   private handlers = new Set<EventHandler>()
+  // 未连接时挂起的 observe_property 订阅, 连接成功后自动重放
+  private pendingObservers = new Map<number, string>()
   private closed = false
   connected = false
 
@@ -44,6 +46,18 @@ export class MpvClient {
           open: (socket: any) => {
             this.sock = socket
             this.connected = true
+            // 重放延迟启动前挂起的 observe_property 订阅
+            for (const [id, name] of this.pendingObservers) {
+              try {
+                socket.write(JSON.stringify({
+                  command: ["observe_property", id, name],
+                  request_id: ++this.reqId,
+                }) + "\n")
+              } catch {
+                /* ignore */
+              }
+            }
+            this.pendingObservers.clear()
             resolve()
           },
           data: (_socket: any, data: Uint8Array) => {
@@ -153,6 +167,11 @@ export class MpvClient {
   }
 
   observeProperty(id: number, name: string) {
+    // 延迟启动: 未连接时记入待订阅队列, 连接后重放 (见 open 回调)
+    if (!this.connected) {
+      this.pendingObservers.set(id, name)
+      return Promise.resolve(null)
+    }
     return this.command("observe_property", id, name)
   }
 

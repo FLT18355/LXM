@@ -1,7 +1,7 @@
 # 蓝汐音乐 (lxm-tui) — 开发文档入口
 
 > 改代码前先读对应专题文档; 改完若行为契约有变, 同步更新对应文档。
-> 版本: r-0.2 (index.ts HELP / `--version` / package.json 三处一致)
+> 版本: r-0.3 (index.ts HELP / `--version` / package.json 三处一致)
 
 ## 文档索引 (按需读, 别整读)
 

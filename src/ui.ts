@@ -138,10 +138,13 @@ export class PlayerUI {
   private plDialogTitle!: TextRenderable
   private plDialogInput!: InputRenderable
   private plDialogHint!: TextRenderable
-  // tab 栏 (播放列表 / 收藏 / 歌单)
+  // tab 栏 (播放列表 / 收藏 / 歌单 / 设置)
   private tabBar!: BoxRenderable
   private tabBtns: BoxRenderable[] = []
   private tabTexts: TextRenderable[] = []
+  // 导航栏播放统计 (设置按钮左边)
+  private playsStat!: TextRenderable
+  private playsTotal = 0
   private theme: Theme = THEMES.latte
   private themeName: ThemeName = "latte"
 
@@ -288,6 +291,16 @@ export class PlayerUI {
       this.tabBtns.push(btn)
       this.tabTexts.push(txt)
     }
+    // 播放统计标签 (设置按钮右边, 灰色小字)
+    this.playsStat = new TextRenderable(r, {
+      content: "",
+      fg: this.theme.overlay,
+      selectable: false,
+      flexGrow: 1,
+      justifyContent: "flex-end",
+      wrapMode: "none",
+    })
+    this.tabBar.add(this.playsStat)
     root.add(this.tabBar)
     this.updateTabBar()
 
@@ -1594,8 +1607,16 @@ export class PlayerUI {
       this.view === "pl" ? "\uF1C5 歌单" : "\uF001 列表"
     this.headModeText.content = ` ${mode} `
     const volStr = p.muted ? "\uF026 静音" : `音量 ${p.volume}`
-    this.headRightText.content =
-      ` ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `
+    this.headRightText.content = clipWidth(
+      ` ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `,
+      40,
+    )
+
+    // 导航栏播放统计 (仅总量变化时写)
+    if (p.totalPlayCount !== this.playsTotal) {
+      this.playsTotal = p.totalPlayCount
+      this.playsStat.content = ` \uF001 共播放 ${p.totalPlayCount} 次 `
+    }
 
     // 正在播放 + 进度条
     this.updateNowPlaying()
@@ -1610,20 +1631,22 @@ export class PlayerUI {
       this.lastPlTitle = ttl
     }
 
-    // 底部状态
+    // 底部状态 (窄终端下截断防溢出)
     if (!this.searchMode) {
       if (Date.now() < this.msgUntil) {
-        this.statusLeft.content = this.msg
+        this.statusLeft.content = clipWidth(this.msg, 120)
         this.statusLeft.fg = this.theme.pink
       } else {
-        this.statusLeft.content =
-          "空格 播放/暂停 · n/p 切歌 · f 收藏 · 1/2/3/4 列表/收藏/歌单/设置 · / 搜索 · M 静音 · +/- 音量 · h 帮助 · q 退出"
+        this.statusLeft.content = clipWidth(
+          "空格 播放/暂停 · n/p 切歌 · f 收藏 · 1/2/3/4 列表/收藏/歌单/设置 · / 搜索 · M 静音 · +/- 音量 · h 帮助 · q 退出",
+          120,
+        )
         this.statusLeft.fg = this.theme.subtext
       }
     }
     this.statusRight.content = p.playing
-      ? ` ${p.currentBase()} · ${String(p.idx + 1)}/${p.playlist.length} `
-      : ` 共 ${p.playlist.length} 首 `
+      ? clipWidth(` ${p.currentBase()} · ${String(p.idx + 1)}/${p.playlist.length} `, 60)
+      : clipWidth(` 共 ${p.playlist.length} 首 `, 60)
 
     // 淡入淡出
     p.updateFade()
@@ -1648,7 +1671,8 @@ export class PlayerUI {
     let title = p.currentTitle()
     const artist = p.currentArtist()
     if (artist) title += ` ┊ ${artist}`
-    this.nowTitleText.content = title
+    // 终端尺寸自适应: 窄终端下截断长标题, 防溢出
+    this.nowTitleText.content = clipWidth(title, 80)
 
     const innerW = (this.timeBox.width || 20) - (this.timeText.width || 18) - 2
     const barw = Math.max(6, Math.min(60, innerW))

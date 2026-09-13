@@ -21,6 +21,7 @@ function emit(ev: MpvEvent) { for (const h of [...handlers]) h(ev) }
 
 const setup = await createTestRenderer({ width: 100, height: 36, kittyKeyboard: true })
 const p = new Player(fakeMpv)
+p.mpvReady = true // 延迟启动: 测试直连, 视为已就绪
 p.playlist = ["/m/1.mp3","/m/2.mp3","/m/3.mp3","/m/4.mp3","/m/5.mp3"]
 p.musicDir = "/m"
 p.queue = [0,1,2,3,4]

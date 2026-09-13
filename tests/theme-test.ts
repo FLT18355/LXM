@@ -15,6 +15,7 @@ const fakeMpv = {
 
 const setup = await createTestRenderer({ width: 100, height: 36, kittyKeyboard: true })
 const p = new Player(fakeMpv)
+p.mpvReady = true // 延迟启动: 测试直连, 视为已就绪
 p.playlist = ["/m/稻香.mp3","/m/雾里.mp3"]
 p.musicDir = "/m"
 p.queue = [0,1]

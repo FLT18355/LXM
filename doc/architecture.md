@@ -2,7 +2,7 @@
 
 > Bun + TypeScript + `@opentui/core` 终端播放器, 引擎是外部 `mpv` (unix socket JSON IPC)。
 > 从 Python curses 版 `lxm.py` 移植, 配置兼容。
-> 版本: r-0.2 (index.ts HELP / `--version` / package.json 三处一致)
+> 版本: r-0.3 (index.ts HELP / `--version` / package.json 三处一致)
 
 ## 目录结构
 
@@ -40,9 +40,11 @@ dist/ dist-js/        构建产物, 勿手改
 2. 音乐目录优先级: 命令行 > config `music_directory` > `~/Music`。不存在即退出。
 3. `scanDirectoryCached` 扫描 (先查 scan-cache.toml, 目录 mtime 未变直接复用, 否则
    全量扫并写缓存), 空则退出。
-4. 拉起 mpv: `Bun.spawn(["mpv","--idle=yes","--no-video", --input-ipc-server=...,
+4. **先建 renderer + PlayerUI** (界面立即显示), 然后后台异步 `Bun.spawn(mpv)` +
+   `waitForSocket` + `connect`。连接完成前置 `player.mpvReady = true`, 期间
+   `playIndex` 对播放请求静默跳过 (UI 已显示但暂不能播)。
+5. 拉起 mpv: `Bun.spawn(["mpv","--idle=yes","--no-video", --input-ipc-server=...,
    "--terminal=no","--quiet","--no-config","--volume=100"])`; `waitForSocket` 轮询 5s。
-5. `createCliRenderer({ exitOnCtrlC, screenMode:"alternate-screen", useMouse:true })`。
 6. `MpvClient.connect` (40 次 × 100ms 重试)。
 7. `new Player(mpv)`: 注入 playlist/queue, 从 config 恢复 volume/speed/theme/favorites;
    断点续播从**缓存 state.toml** 读 (旧 config 同名键自动迁移; pendingSeek 等 time-pos>0.2 后 seek)。
@@ -50,7 +52,7 @@ dist/ dist-js/        构建产物, 勿手改
 9. 主循环: `setInterval(() => ui.tick(), 100)`。
 10. 退出统一走 `shutdown(code)` (幂等 `exited`): 清 interval → `player.saveState()` →
     `mpv.close()` → `renderer.destroy()` → kill mpv (2s 宽限后 kill(9)) → 删 socket →
-    `process.exit`。SIGINT/SIGTERM/renderer destroy/mpv 意外退出都接这里。
+    `process.exit`。SIGINT/SIGTERM/renderer destroy/mpv 意外退出都接这里 (mpv 未启动时 mpvProc 为 null, kill 跳过)。
 
 ## 其他专题
 

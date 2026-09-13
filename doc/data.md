@@ -17,6 +17,8 @@
   启动恢复。旧 config.toml 同名键启动时一次性迁移并清出。
 - `scan-cache.toml` — 音乐目录扫描结果 (dir + mtime + files[])。启动用
   `scanner.scanDirectoryCached()`: 目录 mtime 不变则复用, 否则重扫更新。
+- `plays.toml` — 播放次数统计 (`[[plays]]` 子表: path + count)。每次 `playIndex`
+  发起播放 +1; 导航栏"共播放 N 次"显示总量。
 - 清空: `bun index.ts cache --clear` 或设置视图缓存行 Enter。
 - 环境变量 `LXM_CACHE_DIR` 可重定向 (测试隔离用)。
 

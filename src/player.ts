@@ -4,7 +4,7 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
-import { saveState as saveCacheState } from "./cache"
+import { saveState as saveCacheState, bumpPlay } from "./cache"
 import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
 import type { MpvClient } from "./mpv"
 
@@ -18,10 +18,16 @@ export class Player {
   queue: number[] = []
   repeat: RepeatMode = "OFF"
   isShuffle = false
+  /** mpv 连接完成 (延迟启动期间为 false, UI 据此挡住播放操作) */
+  mpvReady = false
 
   playing = false
   paused = false
   currentPath: string | null = null
+  /** 当前歌曲的累计播放次数 (含本次) */
+  playCount = 0
+  /** 历史总播放次数 (内存累加, 启动时从缓存载入) */
+  totalPlayCount = 0
 
   lyrics: LyricLine[] = []
   lyricTags: LyricTag[] = []
@@ -69,9 +75,14 @@ export class Player {
 
   async playIndex(i: number): Promise<void> {
     if (!this.playlist.length) return
+    // 延迟启动: mpv 未就绪时播放请求直接跳过 (UI 已显示但还不能播)
+    if (!this.mpvReady) return
     this.idx = ((i % this.playlist.length) + this.playlist.length) % this.playlist.length
     const path = this.playlist[this.idx]
     this.currentPath = path
+    // 播放计数: 每次发起播放 +1
+    this.playCount = bumpPlay(path)
+    this.totalPlayCount++
     // 切歌中: 旧文件会触发 end-file(stop), 先抑制, 等新文件加载完成(file-loaded)再恢复
     this.suppressEndFile = true
     if (this.suppressTimer) clearTimeout(this.suppressTimer)

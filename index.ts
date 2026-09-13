@@ -16,12 +16,12 @@ import { MpvClient, waitForSocket } from "./src/mpv"
 import { Player } from "./src/player"
 import { PlayerUI } from "./src/ui"
 import { parseThemeName } from "./src/theme"
-import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, loadState, ensureCacheDir, clearCache, cacheSize } from "./src/cache"
+import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, loadState, ensureCacheDir, clearCache, cacheSize, totalPlays } from "./src/cache"
 
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: r-0.2
+版本: r-0.3
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -107,7 +107,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("r-0.2")
+    console.log("r-0.3")
     return
   }
   let dirArg: string | undefined
@@ -138,7 +138,17 @@ async function main() {
   }
   console.log(`扫描到 ${playlist.length} 首曲目喵~`)
 
-  // ---------- 启动 mpv ----------
+  // ---------- 创建 renderer (先建 UI, mpv 延迟启动) ----------
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: true,
+    screenMode: "alternate-screen",
+    useMouse: true,
+  })
+
+  let interval: ReturnType<typeof setInterval> | null = null
+  let exited = false
+
+  // ---------- mpv 启动准备 (延迟: UI 先显示, 连接完成后置 player.mpvReady) ----------
   const socketPath = join(tmpdir(), `lanxi_mpv_${process.pid}.sock`)
   // rmSync force 直接忽略不存在, 免掉 existsSync + 一次 spawnSync (本机 fork/exec 极慢)
   try {
@@ -150,28 +160,7 @@ async function main() {
     "mpv", "--idle=yes", "--no-video", `--input-ipc-server=${socketPath}`,
     "--terminal=no", "--quiet", "--no-config", "--volume=100",
   ]
-  let mpvProc: ReturnType<typeof Bun.spawn>
-  try {
-    mpvProc = Bun.spawn(mpvCmd, { stdout: "ignore", stderr: "ignore", stdin: "ignore" })
-  } catch {
-    console.log("未找到 mpv, 请先安装喵~")
-    process.exit(1)
-  }
-  if (!(await waitForSocket(socketPath, 5000))) {
-    console.log("mpv 启动超时喵~")
-    mpvProc.kill()
-    process.exit(1)
-  }
-
-  // ---------- 创建 renderer ----------
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: true,
-    screenMode: "alternate-screen",
-    useMouse: true,
-  })
-
-  let interval: ReturnType<typeof setInterval> | null = null
-  let exited = false
+  let mpvProc: ReturnType<typeof Bun.spawn> | null = null
 
   const mpv = new MpvClient()
 
@@ -186,12 +175,14 @@ async function main() {
     }
     mpv.close()
     renderer.destroy()
-    try {
-      mpvProc.kill()
-      await Promise.race([mpvProc.exited, new Promise((r) => setTimeout(r, 2000))])
-      if (mpvProc.exitCode === null) mpvProc.kill(9)
-    } catch {
-      /* ignore */
+    if (mpvProc) {
+      try {
+        mpvProc.kill()
+        await Promise.race([mpvProc.exited, new Promise((r) => setTimeout(r, 2000))])
+        if (mpvProc.exitCode === null) mpvProc.kill(9)
+      } catch {
+        /* ignore */
+      }
     }
     try {
       rmSync(socketPath, { force: true })
@@ -201,26 +192,11 @@ async function main() {
     process.exit(code)
   }
 
-  // mpv 意外退出时也退出
-  mpvProc.exited.then((code) => {
-    if (!exited) {
-      console.log(`\nmpv 已退出 (code ${code}) 喵~`)
-      shutdown(code === null ? 1 : code)
-    }
-  })
-
-  try {
-    await mpv.connect(socketPath, 40, 100)
-  } catch {
-    console.log("无法连接 mpv IPC socket 喵~")
-    mpvProc.kill()
-    process.exit(1)
-  }
-
   const player = new Player(mpv)
   player.musicDir = musicDir
   player.playlist = playlist
   player.queue = playlist.map((_, i) => i)
+  player.totalPlayCount = totalPlays()
   // 音量/倍速: 从配置恢复 (mpv 淡入以 player.volume 为目标; speed 在 loadfile 后应用)
   const savedVol = Number(cfg["volume"])
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol
@@ -229,38 +205,66 @@ async function main() {
 
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
 
-  // ---------- 恢复断点续播 ----------
-  // 优先读缓存 state.toml; 兼容旧版 config.toml 的 last_path/last_pos (一次性迁移到缓存)
-  player.favorites = Array.isArray(cfg["favorites"]) ? (cfg["favorites"] as string[]) : []
-  player.loadPlaylists()
-  const st = loadState()
-  let lastPath = st.last_path ?? (cfg["last_path"] as string | undefined)
-  let lastPos = Number(st.last_pos ?? cfg["last_pos"] ?? 0)
-  if (lastPath) {
-    const idx = playlist.indexOf(lastPath)
-    if (idx !== -1) {
-      player.idx = idx
-      player.currentPath = lastPath
-      await player.playIndex(idx)
-      if (lastPos > 0) player.pendingSeek = lastPos
+  // ---------- 主循环 (100ms) ----------
+  interval = setInterval(() => {
+    if (!exited) ui.tick()
+  }, 100)
+
+  // ---------- 延迟启动 mpv (后台, UI 已显示) ----------
+  ;(async () => {
+    try {
+      // 本机 fork/exec 极慢, UI 已在后台显示期间完成这次 spawn
+      mpvProc = Bun.spawn(mpvCmd, { stdout: "ignore", stderr: "ignore", stdin: "ignore" })
+      // mpv 意外退出时也退出
+      mpvProc.exited.then((code) => {
+        if (!exited) {
+          console.log(`\nmpv 已退出 (code ${code}) 喵~`)
+          shutdown(code === null ? 1 : code)
+        }
+      })
+      if (!(await waitForSocket(socketPath, 5000))) {
+        console.log("mpv 启动超时喵~")
+        mpvProc.kill()
+        shutdown(1)
+        return
+      }
+      await mpv.connect(socketPath, 40, 100)
+    } catch {
+      console.log("无法连接 mpv IPC socket 喵~")
+      mpvProc?.kill()
+      shutdown(1)
+      return
     }
-  }
-  // 迁移: 把旧 config 里的 last_path/last_pos 清掉 (它们已属于缓存)
-  if (cfg["last_path"] !== undefined || cfg["last_pos"] !== undefined) {
-    const { last_path: _, last_pos: __, ...rest } = cfg
-    writeConfig(rest)
-  }
+    player.mpvReady = true
+    ui.updateNowPlaying()
+    // ---------- 恢复断点续播 (mpv 就绪后) ----------
+    // 优先读缓存 state.toml; 兼容旧版 config.toml 的 last_path/last_pos (一次性迁移到缓存)
+    player.favorites = Array.isArray(cfg["favorites"]) ? (cfg["favorites"] as string[]) : []
+    player.loadPlaylists()
+    const st = loadState()
+    let lastPath = st.last_path ?? (cfg["last_path"] as string | undefined)
+    let lastPos = Number(st.last_pos ?? cfg["last_pos"] ?? 0)
+    if (lastPath) {
+      const idx = playlist.indexOf(lastPath)
+      if (idx !== -1) {
+        player.idx = idx
+        player.currentPath = lastPath
+        await player.playIndex(idx)
+        if (lastPos > 0) player.pendingSeek = lastPos
+      }
+    }
+    // 迁移: 把旧 config 里的 last_path/last_pos 清掉 (它们已属于缓存)
+    if (cfg["last_path"] !== undefined || cfg["last_pos"] !== undefined) {
+      const { last_path: _, last_pos: __, ...rest } = cfg
+      writeConfig(rest)
+    }
+  })()
 
   ui.onQuit = () => {
     shutdown(0)
   }
   ui.updatePlaylist()
   ui.updateNowPlaying()
-
-  // ---------- 主循环 (100ms) ----------
-  interval = setInterval(() => {
-    if (!exited) ui.tick()
-  }, 100)
 
   // 渲染器被外部销毁 (Ctrl+C / 信号) 时兜底清理
   renderer.once("destroy", () => {
@@ -274,7 +278,7 @@ async function main() {
       }
       mpv.close()
       try {
-        mpvProc.kill(9)
+        mpvProc?.kill(9)
         rmSync(socketPath, { force: true })
       } catch {
         /* ignore */

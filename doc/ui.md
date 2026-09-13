@@ -17,6 +17,8 @@ plDialogMode: "new" | "rename" | "set-dir" | null  (居中输入弹层)
 - 每视图游标独立: `savedListSel`/`savedFavSel` 在 `setView` 离开时存、进入时恢复。
 - `searchActive` 是叠加在 list/fav 上的过滤态 (queue 换成搜索结果), 进视图切换会清。
 - 全屏歌词 `fullLyrics` 与帮助 `showHelp` 是 absolute overlay (zIndex 200/300), 不是视图。
+- tab 栏右端 `playsStat` (设置按钮右边) 显示"共播放 N 次", 由 tick 里 `totalPlayCount`
+  触发更新 (playIndex 时 +1, 见 data.md plays.toml)。
 
 ## 渲染更新管线
 
