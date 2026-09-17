@@ -26,3 +26,4 @@
 | regress2-test.ts | 搜索/收藏模式下切歌 |
 | loop-test.ts | 单曲循环走 set_property, loadfile 不传 options |
 | cache-test.ts | 缓存 state 读写 / scan-cache mtime 校验 / clearCache |
+| features-test.ts | 播放次数内存缓存 (loadPlayCounts/playIndex 同步) / 睡眠定时器 (cycleSleep/到点) / z 键与信息弹层渲染 |

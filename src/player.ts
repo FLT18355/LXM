@@ -4,12 +4,15 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
-import { saveState as saveCacheState, bumpPlay } from "./cache"
+import { saveState as saveCacheState, bumpPlay, loadPlays } from "./cache"
 import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
 import type { MpvClient } from "./mpv"
 
 export type RepeatMode = "OFF" | "ALL" | "ONE"
 export const REPEAT_CYCLE: RepeatMode[] = ["OFF", "ALL", "ONE"]
+
+/** 睡眠定时器预设 (分钟); 0 = 关闭 */
+export const SLEEP_PRESETS = [0, 15, 30, 60, 90]
 
 export class Player {
   playlist: string[] = []
@@ -28,6 +31,12 @@ export class Player {
   playCount = 0
   /** 历史总播放次数 (内存累加, 启动时从缓存载入) */
   totalPlayCount = 0
+  /** 每首歌播放次数内存缓存 (启动时 loadPlayCounts 载入, playIndex 时同步) */
+  private playCounts = new Map<string, number>()
+
+  // 睡眠定时器: 到点自动暂停; sleepMinutes=0 表示关闭
+  sleepUntil: number | null = null
+  sleepMinutes = 0
 
   lyrics: LyricLine[] = []
   lyricTags: LyricTag[] = []
@@ -82,6 +91,7 @@ export class Player {
     this.currentPath = path
     // 播放计数: 每次发起播放 +1
     this.playCount = bumpPlay(path)
+    this.playCounts.set(path, this.playCount)
     this.totalPlayCount++
     // 切歌中: 旧文件会触发 end-file(stop), 先抑制, 等新文件加载完成(file-loaded)再恢复
     this.suppressEndFile = true
@@ -306,6 +316,46 @@ export class Player {
         last_pos: this.playing ? Math.round(this.timePos * 10) / 10 : 0,
       })
     }
+  }
+
+  // ---------- 播放次数 (内存缓存) ----------
+
+  /** 启动时载入 plays.toml 全部计数到内存 (UI 每行显示, 避免逐首读盘) */
+  loadPlayCounts(): void {
+    this.playCounts = new Map(loadPlays().map((x) => [x.path, x.count]))
+  }
+
+  /** 某首歌的播放次数 (内存版; 没播过返回 0) */
+  playCountOf(path: string | null): number {
+    return path ? this.playCounts.get(path) ?? 0 : 0
+  }
+
+  // ---------- 睡眠定时器 ----------
+
+  /** 切换到下一个/上一个预设 (分钟); 0 = 关闭. 返回新预设值 */
+  cycleSleep(dir = 1): number {
+    const cur = SLEEP_PRESETS.indexOf(this.sleepMinutes)
+    const n = SLEEP_PRESETS.length
+    const idx = ((cur + dir) % n + n) % n
+    this.sleepMinutes = SLEEP_PRESETS[idx]
+    if (this.sleepMinutes === 0) this.sleepUntil = null
+    else this.sleepUntil = Date.now() + this.sleepMinutes * 60_000
+    return this.sleepMinutes
+  }
+
+  /** 剩余秒数; 未开启返回 0 */
+  sleepRemaining(now = Date.now()): number {
+    return this.sleepUntil ? Math.max(0, Math.ceil((this.sleepUntil - now) / 1000)) : 0
+  }
+
+  /** 到点返回 true 并清空定时器; 未到点/未开启返回 false */
+  sleepExpired(now = Date.now()): boolean {
+    if (!this.sleepUntil) return false
+    if (now >= this.sleepUntil) {
+      this.sleepUntil = null
+      return true
+    }
+    return false
   }
 
   // ---------- 显示信息 ----------

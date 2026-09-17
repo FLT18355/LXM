@@ -1,7 +1,7 @@
 # 蓝汐音乐 (lxm-tui) — 开发文档入口
 
 > 改代码前先读对应专题文档; 改完若行为契约有变, 同步更新对应文档。
-> 版本: r-0.3 (index.ts HELP / `--version` / package.json 三处一致)
+> 版本: r-0.4 (index.ts HELP / `--version` / package.json 三处一致)
 
 ## 文档索引 (按需读, 别整读)
 
@@ -21,7 +21,7 @@
 bun index.ts [音乐目录]      # 启动
 bun index.ts config [--music-directory DIR]   # 配置
 bun index.ts cache [--clear] # 缓存查看/清空
-bun run test                 # 7 个测试全绿
+bun run test                 # 8 个测试全绿
 bunx tsc --noEmit            # 类型检查 (TS5097 扩展名告警可忽略)
 bun run build:portable       # 重建 dist-js/ 产物 (源码改动后必须)
 ```

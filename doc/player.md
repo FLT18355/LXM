@@ -38,3 +38,17 @@
 - `saveState()` 写 `last_path`/`last_pos` 到**缓存** `~/.cache/lxmusic/state.toml`
   (运行时状态, 不属于配置)。favorites 即时写 config; theme/volume/speed 调整即时写。
 - 旧 config.toml 的同名键启动时一次性迁移到缓存并清出。
+
+## 播放次数内存缓存 (playCounts)
+
+- `loadPlays()` 在启动时 (index.ts) 全量载入 `plays.toml` 到 `playCounts: Map<path, count>`,
+  UI 行内显示用 `playCountOf(path)` (内存读, 不逐首读盘)。
+- `playIndex()` 每次发起播放 `bumpPlay(path)` 落盘后同步 `playCounts.set(path, n)`,
+  内存与 plays.toml 始终一致。`toggleFavorite`/`refreshDir` 不影响计数 (绝对路径键)。
+
+## 睡眠定时器 (sleepUntil/sleepMinutes)
+
+- `SLEEP_PRESETS = [0, 15, 30, 60, 90]` (0 = 关闭); `cycleSleep(dir)` 循环切换预设。
+- `sleepUntil` 是绝对毫秒时间戳; 到点由 UI tick 的 `sleepExpired()` 检测 →
+  自动暂停 (`mpv.pause(true)`), 清空定时器; 定时器状态**不持久化** (重启即失效)。
+- 头部 `headRightText` 显示 `⏰ mm:ss` 剩余倒计时; 设置视图第 4 行 ←/→ 或全局 `z` 切换。

@@ -21,7 +21,7 @@ import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, loadState, ensureCacheDir, clea
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: r-0.3
+版本: r-0.4
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -35,6 +35,7 @@ const HELP = `
   +/- 音量 (自动保存) ^v/jk 选择 s 随机
   m 循环模式 / 搜索(支持中文) f/F 收藏
   l/L 歌词开关/全屏歌词 (KTV) d 重新扫描目录
+  g/G 列表首/尾   i 歌曲信息   z 睡眠定时 (到点自动暂停)
   1/2/3/4 切换视图: 列表/收藏/歌单/设置 h 帮助 q/Esc 退出
   h  帮助   q/Esc  退出
   M/0  静音
@@ -107,7 +108,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("r-0.3")
+    console.log("r-0.4")
     return
   }
   let dirArg: string | undefined
@@ -197,6 +198,8 @@ async function main() {
   player.playlist = playlist
   player.queue = playlist.map((_, i) => i)
   player.totalPlayCount = totalPlays()
+  // 播放次数内存缓存 (行内显示用; 后续 playIndex 自动同步)
+  player.loadPlayCounts()
   // 音量/倍速: 从配置恢复 (mpv 淡入以 player.volume 为目标; speed 在 loadfile 后应用)
   const savedVol = Number(cfg["volume"])
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol

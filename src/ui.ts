@@ -92,6 +92,9 @@ export class PlayerUI {
   searchQuery = ""
   showHelp = false
   fullLyrics = false
+  showInfo = false
+  private infoOverlay!: BoxRenderable
+  private infoLines: TextRenderable[] = []
   private tickCount = 0
   private lastLyricIdx = -1
   private lastPlTitle = ""
@@ -399,16 +402,18 @@ export class PlayerUI {
     const helpLines: [string, string][] = [
       ["播放控制", "空格/Enter 播放|暂停|播放选中 · n/p 下一首/上一首 · . 手动下一首"],
       ["快进快退", "←/→ ±5秒 · [/] ±10秒"],
-      ["列表操作", "↑↓/jk 选择曲目 · 点击行直接播放 · 1/2/3/4 切换 列表/收藏/歌单/设置"],
+      ["列表操作", "↑↓/jk 选择曲目 · g/G 跳到首/尾 · 点击行直接播放 · 1/2/3/4 切换 列表/收藏/歌单/设置"],
       ["随机与循环", "s 随机播放开关 · m 循环模式(不循环→列表→单曲)"],
       ["歌词与全屏", "l 歌词显示开关 · L 全屏 KTV 歌词"],
       ["收藏与模式", "f 收藏当前歌曲 · 2 收藏视图 · F 收藏模式(快捷)"],
       ["音量", "+ 增音量 · - 减音量 · M/0 静音 · 倍速在 \uF013 设置调整"],
+      ["睡眠定时", "z 切换睡眠定时(15/30/60/90分钟) · 到点自动暂停 · 头部显示剩余倒计时"],
+      ["歌曲信息", "i 查看当前歌曲信息 (歌名/艺术家/路径/播放次数/模式)"],
       ["歌单", "3 歌单 · n 新建 · r 重命名 · d 删除 · Enter 进入详情 · a 加歌 · x 移除"],
       ["搜索与重扫", "/ 搜索(支持中文) · Enter 确认 · Esc 取消 · d 重新扫描目录"],
       ["设置", "4 进入 \uF013 设置 · 主题(Catppuccin 四口味) / 音量 / 倍速(自动保存) / 音乐目录 · h 帮助"],
       ["退出", "q / Esc 退出播放器"],
-      ["贴心功能", "断点续播(退出记位置) · 切歌淡入淡出"],
+      ["贴心功能", "断点续播(退出记位置) · 切歌淡入淡出 · 行内播放次数"],
     ]
     for (const [k, v] of helpLines) {
       this.helpOverlay.add(
@@ -472,6 +477,48 @@ export class PlayerUI {
       }),
     )
     root.add(this.fullOverlay)
+
+    // ── 歌曲信息覆盖层 (i 键) ──
+    this.infoOverlay = new BoxRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: this.theme.crust,
+      visible: false,
+      zIndex: 150,
+    })
+    const infoCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      borderStyle: "single",
+      borderColor: this.theme.lavender,
+      title: " 歌曲信息 ",
+      titleColor: this.theme.lavender,
+      paddingLeft: 3,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      width: 78,
+    })
+    this.infoLines = []
+    for (let i = 0; i < 7; i++) {
+      const row = new TextRenderable(r, { content: "", selectable: false })
+      infoCard.add(row)
+      this.infoLines.push(row)
+    }
+    infoCard.add(
+      new TextRenderable(r, {
+        content: t`${fg(this.theme.pink)(" 按任意键关闭喵~ ")}`,
+        selectable: false,
+        paddingTop: 1,
+      }),
+    )
+    this.infoOverlay.add(infoCard)
+    root.add(this.infoOverlay)
 
     // ── 命名/重命名居中弹层 ──
     this.plDialogOverlay = new BoxRenderable(r, {
@@ -594,6 +641,12 @@ export class PlayerUI {
       key.preventDefault()
       return
     }
+    // 歌曲信息弹层: 任意键关闭
+    if (this.showInfo) {
+      this.closeInfo()
+      key.preventDefault()
+      return
+    }
     // 全屏歌词模式
     if (this.fullLyrics) {
       if (name === "escape" || seq === "q" || seq === "Q" || seq === "l" || seq === "L") {
@@ -633,6 +686,20 @@ export class PlayerUI {
     }
     if (name === "down" || seq === "j") {
       this.moveSel(1)
+      key.preventDefault()
+      return
+    }
+    // g/G: 跳到列表首/尾 (vim 风格)
+    if (seq === "g") {
+      this.sel = 0
+      this.updatePlaylist()
+      key.preventDefault()
+      return
+    }
+    if (seq === "G") {
+      const n = this.listCount()
+      this.sel = Math.max(0, n - 1)
+      this.updatePlaylist()
       key.preventDefault()
       return
     }
@@ -765,9 +832,16 @@ export class PlayerUI {
         p.cycleRepeat()
         this.flash("循环模式: " + REPEAT_LABEL[p.repeat])
         break
+      case seq === "z":
+        p.cycleSleep()
+        this.flashSleep()
+        break
       case seq === "l":
         p.showLyrics = !p.showLyrics
         this.flash(`歌词显示: ${p.showLyrics ? "开" : "关"}`)
+        break
+      case seq === "i":
+        this.openInfo()
         break
       case seq === "L":
         this.setFullLyrics(true)
@@ -904,10 +978,17 @@ export class PlayerUI {
     this.msgUntil = Date.now() + seconds * 1000
   }
 
+  /** 睡眠定时器切换后的提示 (含刷新设置行显示) */
+  private flashSleep() {
+    const m = this.p.sleepMinutes
+    this.flash(m === 0 ? "\uF017 睡眠定时器已关闭喵~" : `\uF017 睡眠定时: ${m} 分钟后自动暂停喵~`, 2)
+    this.updatePlaylist()
+  }
+
   /** 当前视图的行数 */
   private listCount(): number {
     const p = this.p
-    if (this.view === "settings") return 5
+    if (this.view === "settings") return 6
     if (this.view === "pl") {
       if (this.plLevel === "list") return p.playlists.length
       // detail: plCurrent 的歌曲; picker: 全库
@@ -994,11 +1075,14 @@ export class PlayerUI {
 
   // ---------- 设置视图 ----------
 
-  /** 设置项 Enter: 0 主题 / 3 改目录 / 4 缓存清空 */
+  /** 设置项 Enter: 0 主题 / 3 睡眠 / 4 改目录 / 5 缓存清空 */
   settingEnter() {
     if (this.sel === 0) this.cycleTheme()
-    else if (this.sel === 3) this.openPlDialog("set-dir", this.p.musicDir)
-    else if (this.sel === 4) {
+    else if (this.sel === 3) {
+      this.p.cycleSleep()
+      this.flashSleep()
+    } else if (this.sel === 4) this.openPlDialog("set-dir", this.p.musicDir)
+    else if (this.sel === 5) {
       const n = clearCache()
       ensureCacheDir()
       this.flash(`已清空缓存 (${n} 项) 喵~`, 2.2)
@@ -1029,7 +1113,10 @@ export class PlayerUI {
         this.flash(`倍速 ${p.speed.toFixed(2)}x (已保存)`)
         this.updatePlaylist()
       })
-    } else if (this.sel === 4) this.flash("Enter 清空缓存喵~")
+    } else if (this.sel === 3) {
+      this.p.cycleSleep(dir)
+      this.flashSleep()
+    } else if (this.sel === 5) this.flash("Enter 清空缓存喵~")
   }
 
   /** 改音乐目录: 校验 + 持久化 + 重扫 */
@@ -1148,6 +1235,7 @@ export class PlayerUI {
     if (prevName === name) return
     const help = this.showHelp
     const full = this.fullLyrics
+    const info = this.showInfo
     const search = this.searchMode
     const searchA = this.searchActive
     const searchQ = this.searchQuery
@@ -1174,6 +1262,7 @@ export class PlayerUI {
     this.fullLyrics = full
     this.helpOverlay.visible = help
     this.fullOverlay.visible = full
+    if (info) this.openInfo()
     this.searchMode = search
     this.searchActive = searchA
     this.searchQuery = searchQ
@@ -1400,6 +1489,32 @@ export class PlayerUI {
     if (on) this.updateFullLyrics()
   }
 
+  /** 歌曲信息弹层: 打开并填充内容 */
+  private openInfo() {
+    const p = this.p
+    const lines: Array<string | null> = [
+      `歌名    ${p.currentTitle()}`,
+      `艺术家  ${p.currentArtist() || "—"}`,
+      null, // 路径 (仅播放中显示)
+      `已播放  ${p.playCountOf(p.currentPath)} 次`,
+      `位置    第 ${p.idx + 1}/${p.playlist.length} 首${p.playing ? `  ·  时长 ${p.duration > 0 ? fmt(p.duration) : "--:--"}` : ""}`,
+      `模式    ${REPEAT_LABEL[p.repeat]}${p.isShuffle ? " · 随机" : ""}`,
+      `音量    ${p.volume}${p.muted ? " (静音)" : ""}  ·  倍速 ${p.speed.toFixed(2)}x`,
+    ]
+    if (p.currentPath) lines[2] = `路径    ${clipWidth(p.currentPath, 58)}`
+    for (let i = 0; i < this.infoLines.length; i++) {
+      const l = lines[i]
+      this.infoLines[i].content = l ? t`${fg(this.theme.text)(l)}` : ""
+    }
+    this.showInfo = true
+    this.infoOverlay.visible = true
+  }
+
+  private closeInfo() {
+    this.showInfo = false
+    this.infoOverlay.visible = false
+  }
+
   // =========================================================
   //  播放列表渲染 (按 view 分发)
   // =========================================================
@@ -1479,6 +1594,7 @@ export class PlayerUI {
         `主题        ${THEME_LABEL[this.themeName]}  (${THEME_ORDER.length} 种, ←/→ 或 Enter 切换)`,
         `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
         `倍速        ${p.speed.toFixed(2)}x  (←/→ 步进 0.25, 0.25x~4x, 自动保存)`,
+        `睡眠定时    ${p.sleepMinutes === 0 ? "关闭" : `${p.sleepMinutes} 分钟`}  (←/→ 或 z 切换, 到点自动暂停)`,
         `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
         `缓存目录    ${clipWidth(CACHE_DIR, 90)}  (Enter 查看/清空)`,
       ]
@@ -1514,9 +1630,11 @@ export class PlayerUI {
     const path = p.playlist[orig]
     const name = path.split("/").pop() || ""
     const fav = p.favorites.includes(path)
+    const cnt = p.playCountOf(path)
+    const cntStr = cnt > 0 ? ` \uF001 ${cnt}` : ""
     return {
       marker: orig === p.idx ? "\uF04B" : " ",
-      text: `${String(i + 1).padStart(2, " ")} ${name}${fav ? " \uF004" : ""}`,
+      text: `${String(i + 1).padStart(2, " ")} ${name}${fav ? " \uF004" : ""}${cntStr}`,
       playing: orig === p.idx,
     }
   }
@@ -1577,6 +1695,14 @@ export class PlayerUI {
       this.searchInput.focus()
     }
 
+    // 睡眠定时器到点: 自动暂停
+    if (p.sleepExpired()) {
+      if (p.playing && !p.paused) p.mpv.pause(true)
+      p.paused = true
+      this.flash("\uF017 睡眠定时器到点啦喵~ 已自动暂停", 3)
+      this.updatePlaylist()
+    }
+
     // 等化器动画
     if (p.playing && !p.paused) {
       const tc = this.tickCount
@@ -1607,9 +1733,10 @@ export class PlayerUI {
       this.view === "pl" ? "\uF1C5 歌单" : "\uF001 列表"
     this.headModeText.content = ` ${mode} `
     const volStr = p.muted ? "\uF026 静音" : `音量 ${p.volume}`
+    const sleepStr = p.sleepUntil ? ` \uF017 ${fmt(p.sleepRemaining())}` : ""
     this.headRightText.content = clipWidth(
-      ` ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `,
-      40,
+      `${sleepStr} ┊ ${REPEAT_LABEL[p.repeat]} ┊ ${volStr}${p.speed !== 1 ? " ┊ ×" + p.speed.toFixed(2) : ""} `,
+      52,
     )
 
     // 导航栏播放统计 (仅总量变化时写)
@@ -1671,6 +1798,9 @@ export class PlayerUI {
     let title = p.currentTitle()
     const artist = p.currentArtist()
     if (artist) title += ` ┊ ${artist}`
+    // 当前歌曲累计播放次数 (仅播过时显示)
+    const cnt = p.playCountOf(p.currentPath)
+    if (cnt > 0) title += `  · 已播放 ${cnt} 次`
     // 终端尺寸自适应: 窄终端下截断长标题, 防溢出
     this.nowTitleText.content = clipWidth(title, 80)
 
