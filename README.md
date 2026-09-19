@@ -11,15 +11,16 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm
 -  中文搜索（原生 Unicode 输入框）
 -  收藏：`f` 收藏当前曲，列表区四视图 tab（`1` 播放列表 / `2` 收藏 / `3` 歌单 / `4` 设置）
 -  歌单管理：创建 / 重命名 / 删除歌单，进入歌单详情，选歌加入 / 移除，独立持久化为 `playlists.toml`（`3` 或 `P` 进入）
--  设置视图（`4`）：主题（Catppuccin 四口味）· 音量· 倍速· 睡眠定时（均自动保存/即时生效）· 音乐目录（输入路径即时重扫）
--  断点续播：退出记住歌曲与位置，重开自动续播（状态存 `~/.cache/lxmusic/state.toml`）
-  -  切歌淡入淡出（渐弱 → 渐强）
-  -  静音切换（M 或 0）· 进度条鼠标点击/拖动定位
--  睡眠定时器（`z` 切换 15/30/60/90 分钟，头部实时倒计时，到点自动暂停；设置视图第 4 行）
--  歌曲信息弹层（`i` 查看歌名/艺术家/路径/播放次数/模式/音量倍速）
--  行内播放次数（列表/收藏每行显示 ♪N，正在播放卡片显示"已播放 N 次"）
--  `g`/`G` 跳到列表首/尾（vim 风格导航）
--  缓存目录 `~/.cache/lxmusic/`：断点续播状态 + 音乐目录扫描缓存 + 播放次数统计
+- 设置视图（`4`）：主题（Catppuccin 四口味）· 音量· 倍速· 歌词延迟（-5~5s 步进 0.25，负=提前/正=滞后）· 睡眠定时（均自动保存/即时生效）· 音乐目录（输入路径即时重扫）· 版本（只读，源自 `src/version.ts`）
+- 断点续播：退出记住歌曲与位置，重开自动续播（状态存 `~/.cache/lxmusic/state.toml`）
+  - 切歌淡入淡出（渐弱 → 渐强）
+  - 静音切换（M 或 0）· 进度条鼠标点击/拖动定位
+- 歌词延迟对齐（设置第 4 行 ←/→ 步进 0.25s，-5~5s，自动保存；歌词不同步时微调）
+- 歌曲信息弹层（`i` 查看歌名/艺术家/格式/时长/路径/播放次数/模式/音量倍速）
+- 行内播放次数（列表/收藏每行显示 ♪N，正在播放卡片显示"已播放 N 次"）
+- 列表右列元信息：每首歌显示**格式**（扩展名）与**时长**（秒）；歌名不带后缀，超长时行内滚动（选中/播放行）
+- `g`/`G` 跳到列表首/尾（vim 风格导航）
+- 缓存目录 `~/.cache/lxmusic/`：断点续播状态 + 音乐目录扫描缓存 + 播放次数统计 + 歌曲时长缓存
   - `bun index.ts cache` 查看 / `bun index.ts cache --clear` 清空 · 设置视图（`4`）缓存行 Enter 清空
 -  导航栏播放统计：tab 栏右端实时显示"共播放 N 次"
 -  秒开界面：先渲染 UI，mpv 后台异步启动（播放请求在连接前自动等待）
@@ -107,11 +108,13 @@ index.ts          入口: 参数 / mpv 启动 / renderer / 主循环 / 清理
 src/config.ts     配置读写 (TOML, 兼容 Python 版)
 src/cache.ts      缓存目录 ~/.cache/lxmusic/ (断点续播状态 + 扫描缓存)
 src/scanner.ts    音乐目录递归扫描 (带缓存加速)
+src/version.ts    版本号唯一来源 (index/ui 引用; 改版本只动这处)
+src/duration.ts   后台批量探测歌曲时长 (列表右侧显示)
 src/lrc.ts        LRC 歌词解析
 src/mpv.ts        mpv JSON IPC 客户端 (Bun unix socket, 事件驱动)
 src/player.ts     播放器状态与逻辑
 src/playlists.ts  歌单持久化 (TOML 子表数组)
 src/theme.ts      Catppuccin 四口味主题 (Latte/Frappé/Macchiato/Mocha)
 src/ui.ts         OpenTUI 界面 (四视图 tab: 列表/收藏/歌单/设置, 设置内切换主题)
-tests/            无头测试 (ui / theme / playlist / regress / regress2)
+tests/            无头测试 (ui / theme / playlist / regress / regress2 / loop / cache / features)
 ```

@@ -45,10 +45,12 @@ import {
 import { existsSync } from "fs"
 import { resolve } from "path"
 import { Player, REPEAT_CYCLE } from "./player"
+import { titleOf } from "./scanner"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
 import { loadConfig, saveConfig } from "./config"
 import { CACHE_DIR, clearCache, ensureCacheDir } from "./cache"
 import type { MpvEvent } from "./mpv"
+import { VERSION } from "./version"
 
 const REPEAT_LABEL: Record<string, string> = {
   OFF: "不循环",
@@ -75,6 +77,48 @@ function clipWidth(text: string, maxw: number): string {
     width += cw
   }
   return out
+}
+
+/** 字符串显示宽度 (CJK 宽字符计 2) */
+function displayWidth(text: string): number {
+  let w = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    w += code > 0x2e7f && (code <= 0xa4cf || code >= 0xac00) ? 2 : 1
+  }
+  return w
+}
+
+/**
+ * 超长文本行内滚动 (marquee): 宽度未超限原样返回; 超出时按 tick 左右来回滚动,
+ * 头尾各停顿 4 帧. off 为字符偏移 (CJK 按字符计, clipWidth 兜底防溢出).
+ */
+function scrollText(text: string, maxw: number, tick: number): string {
+  if (maxw <= 0) return ""
+  if (displayWidth(text) <= maxw) return text
+  const chars = [...text]
+  // 可滚动的字符步数: 估算可视字符数, 保守取宽/2, 至少滚 1 步
+  const steps = Math.max(1, chars.length - Math.floor(maxw / 2))
+  const period = steps + 8 // 滚动 + 两端停顿
+  const phase = tick % (period * 2)
+  let off: number
+  if (phase < period) off = Math.min(steps, Math.max(0, phase - 4))
+  else off = Math.min(steps, Math.max(0, steps - (phase - period - 4)))
+  if (off >= chars.length) off = 0
+  return clipWidth(chars.slice(off).join(""), maxw)
+}
+
+/** 文件扩展名 (含点, 小写; 无则空串) */
+function extOf(p: string): string {
+  const i = p.lastIndexOf(".")
+  if (i <= 0) return ""
+  const ext = p.slice(i).toLowerCase()
+  return ext.length > 1 && ext.length <= 5 ? ext : ""
+}
+
+/** 列表行右侧元信息: 扩展名 + 时长 (秒; 未知显示 --) */
+function metaOf(path: string, dur: number): string {
+  return `${extOf(path)}  ${dur > 0 ? `${Math.round(dur)}s` : "--"}`
 }
 
 function fmt(sec: number): string {
@@ -123,7 +167,7 @@ export class PlayerUI {
   private lyricInner!: BoxRenderable
   private lyricRows: TextRenderable[] = []
   private plTitle!: TextRenderable
-  private plRows: Array<{ box: BoxRenderable; text: TextRenderable }> = []
+  private plRows: Array<{ box: BoxRenderable; text: TextRenderable; meta: TextRenderable }> = []
   private scrollbox!: ScrollBoxRenderable
   private statusLeft!: TextRenderable
   private statusRight!: TextRenderable
@@ -158,6 +202,10 @@ export class PlayerUI {
   ) {
     this.themeName = themeName
     this.theme = THEMES[themeName] ?? THEMES.latte
+    // 后台探测/播放回填时长后刷新列表 (行右侧格式/时长)
+    this.p.onDurationsUpdated = () => {
+      if (this.view === "list" || this.view === "fav" || this.view === "pl") this.updatePlaylist()
+    }
     this.buildTree()
     this.attachGlobalKeys()
     this.attachMpvEvents()
@@ -384,7 +432,7 @@ export class PlayerUI {
       width: "100%",
       height: "100%",
       backgroundColor: this.theme.base,
-      title: " 帮助 · 本地音乐播放器 ",
+      title: ` 帮助 · 蓝汐音乐 ${VERSION} `,
       titleColor: this.theme.sky,
       paddingLeft: 4,
       paddingRight: 4,
@@ -399,32 +447,69 @@ export class PlayerUI {
       visible: false,
       zIndex: 100,
     })
-    const helpLines: [string, string][] = [
-      ["播放控制", "空格/Enter 播放|暂停|播放选中 · n/p 下一首/上一首 · . 手动下一首"],
-      ["快进快退", "←/→ ±5秒 · [/] ±10秒"],
-      ["列表操作", "↑↓/jk 选择曲目 · g/G 跳到首/尾 · 点击行直接播放 · 1/2/3/4 切换 列表/收藏/歌单/设置"],
-      ["随机与循环", "s 随机播放开关 · m 循环模式(不循环→列表→单曲)"],
-      ["歌词与全屏", "l 歌词显示开关 · L 全屏 KTV 歌词"],
-      ["收藏与模式", "f 收藏当前歌曲 · 2 收藏视图 · F 收藏模式(快捷)"],
-      ["音量", "+ 增音量 · - 减音量 · M/0 静音 · 倍速在 \uF013 设置调整"],
-      ["睡眠定时", "z 切换睡眠定时(15/30/60/90分钟) · 到点自动暂停 · 头部显示剩余倒计时"],
-      ["歌曲信息", "i 查看当前歌曲信息 (歌名/艺术家/路径/播放次数/模式)"],
-      ["歌单", "3 歌单 · n 新建 · r 重命名 · d 删除 · Enter 进入详情 · a 加歌 · x 移除"],
-      ["搜索与重扫", "/ 搜索(支持中文) · Enter 确认 · Esc 取消 · d 重新扫描目录"],
-      ["设置", "4 进入 \uF013 设置 · 主题(Catppuccin 四口味) / 音量 / 倍速(自动保存) / 音乐目录 · h 帮助"],
-      ["退出", "q / Esc 退出播放器"],
-      ["贴心功能", "断点续播(退出记位置) · 切歌淡入淡出 · 行内播放次数"],
+    const helpSections: Array<{ icon: string; title: string; items: Array<[string, string]> }> = [
+      { icon: "\uF04B", title: "播放控制", items: [
+        ["空格 / Enter", "播放 · 暂停 · 播放选中"],
+        ["n / p  ·  ← / →  ·  [ / ]", "切歌 · 快退快进 5 / 10 秒"],
+      ]},
+      { icon: "\uF03A", title: "列表导航", items: [
+        ["↑↓ / jk  ·  g / G", "选择曲目 · 跳到首 / 尾"],
+        ["1 / 2 / 3 / 4", "列表 / 收藏 / 歌单 / 设置"],
+        ["鼠标", "点击行播放 · 点击 tab 切换"],
+      ]},
+      { icon: "\uF074", title: "随机 · 循环 · 歌词", items: [
+        ["s  ·  m", "随机播放 · 循环模式"],
+        ["l / L", "歌词开关 / 全屏 KTV 歌词"],
+        ["设置行 4", "歌词延迟 -5~5s (负=提前, 正=滞后)"],
+        ["自动", "歌词/歌名超宽时行内滚动"],
+      ]},
+      { icon: "\uF004", title: "收藏 · 歌单", items: [
+        ["f / F", "收藏当前曲 / 收藏模式"],
+        ["3 或 P  ·  n / r / d", "歌单视图 · 新建 / 重命名 / 删除"],
+        ["Enter / a / x", "进入详情 / 加歌 / 移除"],
+      ]},
+      { icon: "\uF002", title: "搜索 · 扫描", items: [
+        ["/", "搜索 (中文 · Enter 确认 · Esc 取消)"],
+        ["d", "重新扫描音乐目录"],
+      ]},
+      { icon: "\uF013", title: "音量 · 设置", items: [
+        ["+ / -  ·  M / 0", "音量增减 / 静音"],
+        ["z  ·  i", "睡眠定时 / 歌曲信息 (格式·时长·次数)"],
+        ["4", "设置: 主题/音量/倍速/歌词延迟/目录/版本"],
+      ]},
+      { icon: "\uF08B", title: "退出", items: [
+        ["q / Esc", "退出 / 逐级返回"],
+      ]},
     ]
-    for (const [k, v] of helpLines) {
+    for (const sec of helpSections) {
       this.helpOverlay.add(
-        new TextRenderable(r, { content: t`${bold(fg(this.theme.sky)(` ${k} `))}${fg(this.theme.overlay)("┊ ")}${v}`, selectable: false }),
+        new TextRenderable(r, {
+          content: t`${bold(fg(this.theme.lavender)(` ${sec.icon}  ${sec.title}`))}`,
+          selectable: false,
+        }),
       )
+      for (const [k, v] of sec.items) {
+        // 键列固定显示宽度 22 (CJK 按 2 计), 对齐说明列
+        const pad = Math.max(1, 22 - displayWidth(k))
+        this.helpOverlay.add(
+          new TextRenderable(r, {
+            content: t`${fg(this.theme.overlay)("   ")}${bold(fg(this.theme.sky)(k))}${" ".repeat(pad)}${fg(this.theme.text)(v)}`,
+            selectable: false,
+            wrapMode: "none",
+          }),
+        )
+      }
     }
     this.helpOverlay.add(
       new TextRenderable(r, {
-        content: t`${fg(this.theme.pink)(" 按任意键返回喵~ ")}`,
+        content: t`${fg(this.theme.surface1)("  " + "─".repeat(38))}`,
         selectable: false,
-        attributes: TextAttributes.BOLD,
+      }),
+    )
+    this.helpOverlay.add(
+      new TextRenderable(r, {
+        content: t`${bold(fg(this.theme.pink)(" 按任意键返回喵~"))}${fg(this.theme.overlay)(`   ·   蓝汐音乐 ${VERSION} `)}`,
+        selectable: false,
       }),
     )
     root.add(this.helpOverlay)
@@ -505,7 +590,7 @@ export class PlayerUI {
       width: 78,
     })
     this.infoLines = []
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 9; i++) {
       const row = new TextRenderable(r, { content: "", selectable: false })
       infoCard.add(row)
       this.infoLines.push(row)
@@ -612,6 +697,8 @@ export class PlayerUI {
           }
         } else if (prop === "duration" && typeof data === "number" && Number.isFinite(data)) {
           p.duration = data
+          // 时长回填: 当前播放曲目的时长进缓存 (列表右侧显示)
+          p.noteDuration(p.currentPath, data)
         } else if (prop === "pause") {
           p.paused = data === true
         }
@@ -988,7 +1075,7 @@ export class PlayerUI {
   /** 当前视图的行数 */
   private listCount(): number {
     const p = this.p
-    if (this.view === "settings") return 6
+    if (this.view === "settings") return 8
     if (this.view === "pl") {
       if (this.plLevel === "list") return p.playlists.length
       // detail: plCurrent 的歌曲; picker: 全库
@@ -1075,24 +1162,26 @@ export class PlayerUI {
 
   // ---------- 设置视图 ----------
 
-  /** 设置项 Enter: 0 主题 / 3 睡眠 / 4 改目录 / 5 缓存清空 */
+  /** 设置项 Enter: 0 主题 / 3 歌词延迟 / 4 睡眠 / 5 改目录 / 6 缓存清空 / 7 版本只读 */
   settingEnter() {
     if (this.sel === 0) this.cycleTheme()
-    else if (this.sel === 3) {
+    else if (this.sel === 3) this.flash("用 ←/→ 调整歌词延迟喵~ (-5~5s, 步进 0.25, 正=滞后/负=提前, 自动保存)")
+    else if (this.sel === 4) {
       this.p.cycleSleep()
       this.flashSleep()
-    } else if (this.sel === 4) this.openPlDialog("set-dir", this.p.musicDir)
-    else if (this.sel === 5) {
+    } else if (this.sel === 5) this.openPlDialog("set-dir", this.p.musicDir)
+    else if (this.sel === 6) {
       const n = clearCache()
       ensureCacheDir()
       this.flash(`已清空缓存 (${n} 项) 喵~`, 2.2)
       this.updatePlaylist()
     }
+    else if (this.sel === 7) this.flash(`当前版本 ${VERSION} 喵~`)
     else if (this.sel === 2) this.flash("用 ←/→ 调整倍速喵~ (步进 0.25, 自动保存)")
     else this.flash("用 ←/→ 或 +/- 调整音量喵~ (自动保存)")
   }
 
-  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5, 倍速=∓0.25 (持久化) */
+  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5, 倍速=∓0.25, 歌词延迟=∓0.25 (持久化) */
   settingAdjust(dir: number) {
     const p = this.p
     if (this.sel === 0) {
@@ -1114,9 +1203,15 @@ export class PlayerUI {
         this.updatePlaylist()
       })
     } else if (this.sel === 3) {
+      p.setLyricDelay(p.lyricDelay + dir * 0.25)
+      saveConfig({ lyric_delay: p.lyricDelay })
+      this.flash(`歌词延迟 ${p.lyricDelay.toFixed(2)}s (已保存)`)
+      this.updatePlaylist()
+    } else if (this.sel === 4) {
       this.p.cycleSleep(dir)
       this.flashSleep()
-    } else if (this.sel === 5) this.flash("Enter 清空缓存喵~")
+    } else if (this.sel === 6) this.flash("Enter 清空缓存喵~")
+    else if (this.sel === 7) this.flash("版本是只读的喵~ h 帮助查看更多")
   }
 
   /** 改音乐目录: 校验 + 持久化 + 重扫 */
@@ -1492,16 +1587,20 @@ export class PlayerUI {
   /** 歌曲信息弹层: 打开并填充内容 */
   private openInfo() {
     const p = this.p
+    const path = p.currentPath
+    const dur = p.durationOf(path)
     const lines: Array<string | null> = [
       `歌名    ${p.currentTitle()}`,
       `艺术家  ${p.currentArtist() || "—"}`,
-      null, // 路径 (仅播放中显示)
-      `已播放  ${p.playCountOf(p.currentPath)} 次`,
-      `位置    第 ${p.idx + 1}/${p.playlist.length} 首${p.playing ? `  ·  时长 ${p.duration > 0 ? fmt(p.duration) : "--:--"}` : ""}`,
+      `格式    ${extOf(path || "").replace(".", "").toUpperCase() || "—"}  ·  时长 ${dur > 0 ? `${Math.round(dur)} 秒` : "--"}`,
+      null, // 路径
+      `已播放  ${p.playCountOf(path)} 次`,
+      `位置    第 ${p.idx + 1}/${p.playlist.length} 首${p.playing ? `  ·  ${p.duration > 0 ? fmt(p.duration) : "--:--"}` : ""}`,
       `模式    ${REPEAT_LABEL[p.repeat]}${p.isShuffle ? " · 随机" : ""}`,
       `音量    ${p.volume}${p.muted ? " (静音)" : ""}  ·  倍速 ${p.speed.toFixed(2)}x`,
+      `歌词延迟 ${p.lyricDelay > 0 ? "+" : ""}${p.lyricDelay.toFixed(2)}s`,
     ]
-    if (p.currentPath) lines[2] = `路径    ${clipWidth(p.currentPath, 58)}`
+    if (path) lines[3] = `路径    ${clipWidth(path, 58)}`
     for (let i = 0; i < this.infoLines.length; i++) {
       const l = lines[i]
       this.infoLines[i].content = l ? t`${fg(this.theme.text)(l)}` : ""
@@ -1540,11 +1639,20 @@ export class PlayerUI {
       const text = new TextRenderable(this.renderer, {
         content: "",
         selectable: false,
-        width: "100%",
+        flexGrow: 1,
+        wrapMode: "none",
       })
       box.add(text)
+      const meta = new TextRenderable(this.renderer, {
+        content: "",
+        selectable: false,
+        paddingLeft: 1,
+        paddingRight: 1,
+        wrapMode: "none",
+      })
+      box.add(meta)
       this.scrollbox.add(box)
-      this.plRows.push({ box, text })
+      this.plRows.push({ box, text, meta })
     }
   }
 
@@ -1582,8 +1690,8 @@ export class PlayerUI {
     }
   }
 
-  /** 当前视图每行数据: 返回 [marker, text, isPlaying] */
-  private rowAt(i: number): { marker: string; text: string; playing: boolean } {
+  /** 当前视图每行数据: 返回 [marker, text, meta, isPlaying] (meta=右侧格式/时长) */
+  private rowAt(i: number): { marker: string; text: string; meta: string; playing: boolean } {
     const p = this.p
     if (this.view === "settings") {
       const vol = p.volume
@@ -1594,47 +1702,57 @@ export class PlayerUI {
         `主题        ${THEME_LABEL[this.themeName]}  (${THEME_ORDER.length} 种, ←/→ 或 Enter 切换)`,
         `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
         `倍速        ${p.speed.toFixed(2)}x  (←/→ 步进 0.25, 0.25x~4x, 自动保存)`,
+        `歌词延迟    ${p.lyricDelay > 0 ? "+" : ""}${p.lyricDelay.toFixed(2)}s  (←/→ 步进 0.25, -5~5s, 正=滞后/负=提前, 自动保存)`,
         `睡眠定时    ${p.sleepMinutes === 0 ? "关闭" : `${p.sleepMinutes} 分钟`}  (←/→ 或 z 切换, 到点自动暂停)`,
         `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
         `缓存目录    ${clipWidth(CACHE_DIR, 90)}  (Enter 查看/清空)`,
+        `版本        ${VERSION}  (只读 · 帮助 h 查看更多)`,
       ]
-      return { marker: " ", text: rows[i] || "", playing: false }
+      return { marker: " ", text: rows[i] || "", meta: "", playing: false }
     }
     if (this.view === "pl") {
       if (this.plLevel === "list") {
         const list = p.playlists
         const pl = list[i]
-        if (!pl) return { marker: " ", text: "", playing: false }
-        return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${pl.name}  (${pl.paths.length} 首)`, playing: false }
+        if (!pl) return { marker: " ", text: "", meta: "", playing: false }
+        return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${pl.name}  (${pl.paths.length} 首)`, meta: "", playing: false }
       }
       if (this.plPickerMode) {
         const path = p.playlist[i]
-        if (!path) return { marker: " ", text: "", playing: false }
-        const name = path.split("/").pop() || ""
+        if (!path) return { marker: " ", text: "", meta: "", playing: false }
         const inPl = this.plCurrent ? p.playlistPaths(this.plCurrent).includes(path) : false
-        return { marker: inPl ? "\uF067" : " ", text: `${String(i + 1).padStart(2, " ")} ${name}`, playing: i === p.idx }
+        return {
+          marker: inPl ? "\uF067" : " ",
+          text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}`,
+          meta: metaOf(path, p.durationOf(path)),
+          playing: i === p.idx,
+        }
       }
       // detail
-      if (!this.plCurrent) return { marker: " ", text: "", playing: false }
+      if (!this.plCurrent) return { marker: " ", text: "", meta: "", playing: false }
       const paths = p.playlistPaths(this.plCurrent)
       const path = paths[i]
-      if (!path) return { marker: " ", text: "", playing: false }
-      const name = path.split("/").pop() || ""
+      if (!path) return { marker: " ", text: "", meta: "", playing: false }
       const realIdx = p.playlist.indexOf(path)
-      return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${name}`, playing: realIdx === p.idx }
+      return {
+        marker: " ",
+        text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}`,
+        meta: metaOf(path, p.durationOf(path)),
+        playing: realIdx === p.idx,
+      }
     }
     // list / fav
     const useQueue = this.searchActive || this.view === "fav" || p.favMode
     const orig = useQueue ? p.queue[i] : i
-    if (orig === undefined || !p.playlist[orig]) return { marker: " ", text: "", playing: false }
+    if (orig === undefined || !p.playlist[orig]) return { marker: " ", text: "", meta: "", playing: false }
     const path = p.playlist[orig]
-    const name = path.split("/").pop() || ""
     const fav = p.favorites.includes(path)
     const cnt = p.playCountOf(path)
     const cntStr = cnt > 0 ? ` \uF001 ${cnt}` : ""
     return {
       marker: orig === p.idx ? "\uF04B" : " ",
-      text: `${String(i + 1).padStart(2, " ")} ${name}${fav ? " \uF004" : ""}${cntStr}`,
+      text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}${fav ? " \uF004" : ""}${cntStr}`,
+      meta: metaOf(path, p.durationOf(path)),
       playing: orig === p.idx,
     }
   }
@@ -1643,21 +1761,35 @@ export class PlayerUI {
     const p = this.p
     const n = this.listCount()
     if (this.plRows.length !== n) this.rebuildPlaylistRows(n)
+    // 行可用宽度: 布局前未知则用 100 兜底 (滚动/截断自适应)
+    const availW = typeof this.scrollbox.width === "number" && this.scrollbox.width > 1 ? this.scrollbox.width : 100
     for (let i = 0; i < n; i++) {
       const row = this.plRows[i]
-      const { marker, text, playing } = this.rowAt(i)
+      const { marker, text, meta, playing } = this.rowAt(i)
       const isSel = i === this.sel
-      const line = `${marker} ${text}`
+      const metaW = displayWidth(meta)
+      const nameW = Math.max(10, availW - metaW - 5)
+      // marker + 序号固定, 歌名部分超长时滚动 (marquee), 否则截断
+      const sp = text.indexOf(" ", 1)
+      const head = sp === -1 ? text : text.slice(0, sp) // " 01"
+      const rest = sp === -1 ? "" : text.slice(sp + 1)  // 歌名 + ♥ + ♪N
+      const shown =
+        isSel || playing ? scrollText(rest, nameW - displayWidth(head), this.tickCount)
+        : clipWidth(rest, nameW - displayWidth(head))
+      const line = `${marker}${head} ${shown}`
       const box = row.box
       if (isSel) {
         box.backgroundColor = this.theme.surface1
-        row.text.content = t`${fg(this.theme.text)(bold(clipWidth(line, 200)))}`
+        row.text.content = t`${fg(this.theme.text)(bold(line))}`
+        row.meta.content = t`${fg(this.theme.text)(meta)}`
       } else if (playing) {
         box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.green)(bold(clipWidth(line, 200)))}`
+        row.text.content = t`${fg(this.theme.green)(bold(line))}`
+        row.meta.content = t`${fg(this.theme.green)(meta)}`
       } else {
         box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.text)(clipWidth(line, 200))}`
+        row.text.content = t`${fg(this.theme.text)(line)}`
+        row.meta.content = t`${fg(this.theme.overlay)(meta)}`
       }
     }
     try {
@@ -1838,8 +1970,10 @@ export class PlayerUI {
       return
     }
     let cur = -1
+    // 歌词延迟: 匹配时间 = 播放位置 - 延迟 (延迟>0 时歌词滞后于声音)
+    const lyricTime = p.timePos - p.lyricDelay
     for (let i = 0; i < p.lyrics.length; i++) {
-      if (p.lyrics[i].time <= p.timePos) cur = i
+      if (p.lyrics[i].time <= lyricTime) cur = i
       else break
     }
     if (cur < 0) cur = 0
@@ -1851,8 +1985,13 @@ export class PlayerUI {
       const lineIdx = cur + (r - center)
       const row = this.lyricRows[r]
       if (lineIdx >= 0 && lineIdx < p.lyrics.length) {
-        const txt = clipWidth(p.lyrics[lineIdx].text, (this.lyricInner.width || 40) - 4)
-        if (p.lyrics[lineIdx].time === curTime) {
+        const maxW = (this.lyricInner.width || 40) - 4
+        const isCur = p.lyrics[lineIdx].time === curTime
+        // 当前句: 超长时行内滚动; 其它句: 截断
+        const txt = isCur
+          ? scrollText(p.lyrics[lineIdx].text, maxW, this.tickCount)
+          : clipWidth(p.lyrics[lineIdx].text, maxW)
+        if (isCur) {
           row.content = t`${fg(this.theme.sky)(bold("\uF001 " + txt))}`
         } else {
           const dist = Math.abs(r - center)
@@ -1887,12 +2026,12 @@ export class PlayerUI {
     const title = p.currentTitle()
     this.fullTitle.content = ` ${p.playing ? (p.paused ? "\uF04C" : "\uF04B") : "⏹"} ${title} `
     const dur = p.duration
-    const tpos = p.timePos
+    const tpos = p.timePos - p.lyricDelay
     const pct = dur > 0 ? Math.max(0, Math.min(1, tpos / dur)) : 0
     const barw = Math.max(10, (this.fullOverlay.width || 40) - 24)
     const filled = Math.round(barw * pct)
     const durText = dur > 0 ? fmt(dur) : "--:--"
-    this.fullProgress.content = t`${fg(this.theme.lavender)("█".repeat(filled))}${fg(this.theme.surface1)("░".repeat(barw - filled))} ${fmt(tpos)} / ${durText}`
+    this.fullProgress.content = t`${fg(this.theme.lavender)("█".repeat(filled))}${fg(this.theme.surface1)("░".repeat(barw - filled))} ${fmt(Math.max(0, tpos))} / ${durText}`
     if (!p.lyrics.length) {
       for (let i = 0; i < this.fullLyricRows.length; i++) {
         this.fullLyricRows[i].content =
@@ -1911,15 +2050,18 @@ export class PlayerUI {
     // 同一时间戳的多句一起高亮
     const curTime = p.lyrics[cur].time
     const MID = Math.floor(this.fullLyricRows.length / 2)
+    const fullMaxW = Math.max(20, (this.fullOverlay.width || 80) - 12)
     for (let r = 0; r < this.fullLyricRows.length; r++) {
       const offset = r - MID
       const idx = cur + offset
       const row = this.fullLyricRows[r]
       if (idx >= 0 && idx < p.lyrics.length && p.lyrics[idx].time === curTime) {
-        row.content = t`${fg(this.theme.sky)(bold("\uF001     " + p.lyrics[idx].text))}`
+        // 当前句: 超长时行内滚动
+        const txt = scrollText(p.lyrics[idx].text, fullMaxW, this.tickCount)
+        row.content = t`${fg(this.theme.sky)(bold("\uF001     " + txt))}`
       } else if (idx >= 0 && idx < p.lyrics.length) {
         const col = Math.abs(offset) <= 1 ? this.theme.subtext : this.theme.overlay
-        row.content = t`${fg(col)("      " + p.lyrics[idx].text)}`
+        row.content = t`${fg(col)("      " + clipWidth(p.lyrics[idx].text, fullMaxW))}`
       } else {
         row.content = ""
       }

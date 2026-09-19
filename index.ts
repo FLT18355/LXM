@@ -14,14 +14,16 @@ import { CONFIG_FILE, loadConfig, saveConfig, writeConfig } from "./src/config"
 import { scanDirectory, scanDirectoryCached } from "./src/scanner"
 import { MpvClient, waitForSocket } from "./src/mpv"
 import { Player } from "./src/player"
+import { probeDurations } from "./src/duration"
 import { PlayerUI } from "./src/ui"
 import { parseThemeName } from "./src/theme"
-import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, loadState, ensureCacheDir, clearCache, cacheSize, totalPlays } from "./src/cache"
+import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, DURATIONS_FILE, loadState, ensureCacheDir, clearCache, cacheSize, totalPlays } from "./src/cache"
+import { VERSION } from "./src/version"
 
 const HELP = `
 本地音乐播放器 (OpenTUI + mpv)
 
-版本: r-0.4
+版本: ${VERSION}
 
 用法:
   bun index.ts [音乐目录]                        启动播放器
@@ -88,8 +90,10 @@ async function handleCache(args: string[]): Promise<void> {
   console.log(`  占用: ${sizeStr} (${size} 字节)`)
   const stateExists = existsSync(STATE_FILE)
   const scanExists = existsSync(SCAN_CACHE_FILE)
+  const durExists = existsSync(DURATIONS_FILE)
   console.log(`  state.toml (断点续播):    ${stateExists ? "存在" : "无"}`)
   console.log(`  scan-cache.toml (扫描缓存): ${scanExists ? "存在" : "无"}`)
+  console.log(`  durations.toml (时长缓存): ${durExists ? "存在" : "无"}`)
   console.log("清空: bun index.ts cache --clear")
 }
 
@@ -108,7 +112,7 @@ async function main() {
     return
   }
   if (argv[0] === "--version" || argv[0] === "-v") {
-    console.log("r-0.4")
+    console.log(VERSION)
     return
   }
   let dirArg: string | undefined
@@ -162,6 +166,8 @@ async function main() {
     "--terminal=no", "--quiet", "--no-config", "--volume=100",
   ]
   let mpvProc: ReturnType<typeof Bun.spawn> | null = null
+  // 后台时长探测进程 (probeDurations 启动后赋值, 退出时一并清理)
+  let probeProc: Bun.Subprocess | null = null
 
   const mpv = new MpvClient()
 
@@ -176,6 +182,11 @@ async function main() {
     }
     mpv.close()
     renderer.destroy()
+    try {
+      probeProc?.kill()
+    } catch {
+      /* ignore */
+    }
     if (mpvProc) {
       try {
         mpvProc.kill()
@@ -200,11 +211,14 @@ async function main() {
   player.totalPlayCount = totalPlays()
   // 播放次数内存缓存 (行内显示用; 后续 playIndex 自动同步)
   player.loadPlayCounts()
+  // 时长缓存 (durations.toml): 有缓存直接显示, 免每次重新探测
+  player.loadDurations()
   // 音量/倍速: 从配置恢复 (mpv 淡入以 player.volume 为目标; speed 在 loadfile 后应用)
   const savedVol = Number(cfg["volume"])
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol
   const savedSpeed = Number(cfg["speed"])
-  if (Number.isFinite(savedSpeed) && savedSpeed >= 0.25 && savedSpeed <= 4.0) player.speed = savedSpeed
+  const savedDelay = Number(cfg["lyric_delay"])
+  if (Number.isFinite(savedDelay) && savedDelay >= -5 && savedDelay <= 5) player.lyricDelay = savedDelay
 
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
 
@@ -260,6 +274,19 @@ async function main() {
     if (cfg["last_path"] !== undefined || cfg["last_pos"] !== undefined) {
       const { last_path: _, last_pos: __, ...rest } = cfg
       writeConfig(rest)
+    }
+    // ---------- 后台批量探测时长 (仅缺失项; 列表右侧格式/时长显示) ----------
+    // 独立 mpv 实例, 串行逐首; 不阻塞 UI, 探测一首写缓存并刷新一行。已缓存的不再探测。
+    const missing = playlist.filter((p) => player.durationOf(p) <= 0)
+    if (missing.length) {
+      void probeDurations(
+        missing,
+        (path, dur) => player.noteDuration(path, dur),
+        undefined,
+        (proc) => {
+          probeProc = proc
+        },
+      )
     }
   })()
 

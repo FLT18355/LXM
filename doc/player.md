@@ -52,3 +52,21 @@
 - `sleepUntil` 是绝对毫秒时间戳; 到点由 UI tick 的 `sleepExpired()` 检测 →
   自动暂停 (`mpv.pause(true)`), 清空定时器; 定时器状态**不持久化** (重启即失效)。
 - 头部 `headRightText` 显示 `⏰ mm:ss` 剩余倒计时; 设置视图第 4 行 ←/→ 或全局 `z` 切换。
+
+## 歌词延迟 (lyricDelay)
+
+- `lyricDelay` (秒, **-5~5**, 步进 0.25 取整) `setLyricDelay(d)` clamp; 启动从 config `lyric_delay` 恢复。
+- UI 歌词匹配用 `timePos - lyricDelay` 作为基准时间 (小窗 + 全屏一致):
+  延迟 > 0 → 歌词滞后于声音 (字幕偏快时往后调正数); 延迟 < 0 → 歌词提前; 0 = 同步。
+- 持久化 `saveConfig({ lyric_delay })`; 纯 UI 层逻辑, 不触碰 mpv。
+
+## 时长缓存 (durations)
+
+- `durations: Map<path, 秒>` — 列表右侧显示每首时长用; 未知显示 `--`。
+- **持久化** `~/.cache/lxmusic/durations.toml` (`[[durations]]`): 启动 `loadDurations()`
+  载入, 命中即直接显示; 仅对缺失项后台探测, 免每次重算。
+- 两条回填路径: (1) 播放时 mpv `duration` property-change / `get_property` → `noteDuration`
+  (见 ui.ts attachMpvEvents); (2) 启动后 `src/duration.ts` 的 `probeDurations` 用独立
+  mpv 实例串行探测**缺失项**, 逐首 `onDurationsUpdated` 通知 UI 刷新 (不阻塞)。
+- `noteDuration` 幂等 (值不变不写盘/不回调) 并 `saveDuration` 落盘; `durationOf(path)` 读取
+  (多处调用, 见 ui.md)。

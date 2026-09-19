@@ -16,6 +16,7 @@ export const CACHE_DIR = process.env["LXM_CACHE_DIR"] || join(homedir(), ".cache
 export const STATE_FILE = join(CACHE_DIR, "state.toml")
 export const SCAN_CACHE_FILE = join(CACHE_DIR, "scan-cache.toml")
 export const PLAYS_FILE = join(CACHE_DIR, "plays.toml")
+export const DURATIONS_FILE = join(CACHE_DIR, "durations.toml")
 
 export type StateFile = {
   last_path?: string
@@ -216,4 +217,72 @@ export function playCountOf(path: string): number {
 /** 累计播放次数 (导航栏"总播放"用) */
 export function totalPlays(): number {
   return loadPlays().reduce((s, x) => s + x.count, 0)
+}
+
+// ---------- 歌曲时长缓存 (durations.toml) ----------
+// 格式: [[durations]] 子表数组 — 存整数秒, 避免每次启动重新探测
+//   [[durations]]
+//   path = "/abs/path/a.mp3"
+//   dur = 231
+
+export type DurationEntry = { path: string; dur: number }
+
+/** 读取全部已缓存时长 (无则空数组) */
+export function loadDurations(): DurationEntry[] {
+  try {
+    if (!existsSync(DURATIONS_FILE)) return []
+    const src = readFileSync(DURATIONS_FILE, "utf-8")
+    const out: DurationEntry[] = []
+    let path = ""
+    let dur = 0
+    for (const raw of src.split("\n")) {
+      const line = raw.trim()
+      if (!line || line.startsWith("#")) continue
+      if (line.startsWith("[[") && line.endsWith("]]")) {
+        if (path) out.push({ path, dur })
+        path = ""
+        dur = 0
+        continue
+      }
+      const m = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/)
+      if (!m) continue
+      if (m[1] === "path" && m[2].trim().startsWith('"')) {
+        path = m[2].trim().replace(/^"|"$/g, "").replace(/\\"/g, '"')
+      } else if (m[1] === "dur") {
+        const n = Number(m[2].trim())
+        if (!Number.isNaN(n)) dur = n
+      }
+    }
+    if (path) out.push({ path, dur })
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** 写入/更新单曲时长 (秒, 取整) 到缓存; 值未变则跳过写盘 */
+export function saveDuration(path: string, dur: number): void {
+  const sec = Math.round(dur)
+  if (!path || !(sec > 0)) return
+  const all = loadDurations()
+  const hit = all.find((x) => x.path === path)
+  if (hit) {
+    if (hit.dur === sec) return
+    hit.dur = sec
+  } else {
+    all.push({ path, dur: sec })
+  }
+  ensureCacheDir()
+  const lines = ["# 歌曲时长缓存 — 由 lxm-tui 自动维护 (秒)", ""]
+  for (const d of all) {
+    lines.push("[[durations]]")
+    lines.push(`path = "${d.path.replace(/"/g, '\\"')}"`)
+    lines.push(`dur = ${d.dur}`)
+    lines.push("")
+  }
+  try {
+    writeFileSync(DURATIONS_FILE, lines.join("\n"))
+  } catch {
+    /* ignore */
+  }
 }

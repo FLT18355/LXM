@@ -16,8 +16,10 @@ plDialogMode: "new" | "rename" | "set-dir" | null  (居中输入弹层)
 
 - 每视图游标独立: `savedListSel`/`savedFavSel` 在 `setView` 离开时存、进入时恢复。
 - `searchActive` 是叠加在 list/fav 上的过滤态 (queue 换成搜索结果), 进视图切换会清。
-- 全屏歌词 `fullLyrics` 与帮助 `showHelp` 是 absolute overlay (zIndex 200/300), 不是视图;
+- 全屏歌词 `fullLyrics` 与帮助 `showHelp` 是 absolute overlay (zIndex 200/100), 不是视图;
   歌曲信息弹层 `showInfo` 是居中卡片 overlay (zIndex 150, `i` 键开, 任意键关)。
+- 帮助 overlay 为分组卡片式: `helpSections` (图标 + 组名 + `[键, 说明]` 列表), 键列按显示宽度
+  22 对齐; 标题与底部带 `VERSION` (见 src/version.ts)。加/改帮助项只动 `helpSections`。
 - tab 栏右端 `playsStat` (设置按钮右边) 显示"共播放 N 次", 由 tick 里 `totalPlayCount`
   触发更新 (playIndex 时 +1, 见 data.md plays.toml)。
 - 睡眠定时器: `z` 全局切换预设 (见 player.md), 头部 `headRightText` 实时倒计时,
@@ -28,16 +30,20 @@ plDialogMode: "new" | "rename" | "set-dir" | null  (居中输入弹层)
 - `tick()` (100ms): 等化器动画 → `updatePlaylist()` → `updateNowPlaying()` →
   `updateLyrics()` → 标题/状态栏 → `p.updateFade()` → duration 兜底拉取 → 全屏歌词。
 - `updatePlaylist()` 是列表区唯一真相源, 三函数协作:
-  - `listCount()`: 当前视图行数 (settings 恒 6: 主题/音量/倍速/睡眠定时/音乐目录/缓存)。
-  - `rowAt(i)`: 返回 `{ marker, text, playing }`。
-  - `rebuildPlaylistRows(count)`: 行数变化时增删行节点, 否则只改 content。
+  - `listCount()`: 当前视图行数 (settings 恒 8: 主题/音量/倍速/歌词延迟/睡眠定时/音乐目录/缓存/版本)。
+  - `rowAt(i)`: 返回 `{ marker, text, meta, playing }` (`meta` = 右侧"扩展名 + 时长秒数")。
+  - `rebuildPlaylistRows(count)`: 行数变化时增删行节点 (每行 = box + text 主列 + meta 右列), 否则只改 content。
   - **新增视图必须同时改这三处 + `onRowClick` + `playlistTitle` + `handleKey` 路由**,
     漏一处就是渲染错位或按键穿透。
-- 列表/收藏每行尾部显示该曲累计播放次数 (`playCountOf`, 内存缓存, 见 player.md),
-  正在播放卡片标题后追加"已播放 N 次"; 均只播过才显示。
-- 歌词高亮: 当前句 = `time <= timePos` 的最后一行; **同一时间戳所有行一起高亮**
-  (和声/重复词), 小窗与全屏 (KTV) 逻辑一致。LRC 空文本时间戳行会照常渲染成空行
-  (歌词文件问题, 非 bug)。
+- 列表行去扩展名显示歌名 (`titleOf`), 右侧 meta 显示格式 + 时长 (秒, 未知为 `--`)。
+  时长来自 `p.durationOf` (播放回填 + `src/duration.ts` 后台探测, 见 player.md)。
+- 超宽滚动: 选中/播放行的歌名超长时用 `scrollText` 行内滚动 (marquee, 由 `tickCount` 驱动);
+  非选中行 `clipWidth` 截断。歌词区当前句同样滚动 (小窗 + 全屏)。
+- 行内播放次数: 每行尾部 `♪N` (`playCountOf`, 内存缓存, 只播过才显示);
+  正在播放卡片标题后追加"已播放 N 次"。
+- 歌词高亮: 当前句 = `time <= (timePos - lyricDelay)` 的最后一行; **同一时间戳所有行一起高亮**
+  (和声/重复词), 小窗与全屏 (KTV) 逻辑一致; `lyricDelay` 由设置行 4 调整 (-5~5s, 负=提前, 见 player.md)。
+  LRC 空文本时间戳行会照常渲染成空行 (歌词文件问题, 非 bug)。
 
 ## 事件挂接规则 (历史踩坑)
 
@@ -65,10 +71,11 @@ pl 路由块 → 普通 switch (空格/n/p/seek/m/s/z/i/f/F/l/L/d/h/1..4/q/±/M)
 
 ## 快捷键现状
 
-- `t` 废弃 (只 flash 提示); 主题/音量/倍速/睡眠定时/目录/缓存全在 `4` 设置视图
-  (设置行: 0 主题 / 1 音量 / 2 倍速 / 3 睡眠定时 / 4 音乐目录 / 5 缓存)。
-- `r`/`a` 在歌单视图是重命名/加歌; 倍速只在设置视图 `←/→` 步进 0.25。
-- 音量 `+`/`-` 即时 `saveConfig({ volume })`; 倍速调整 `saveConfig({ speed })`。
+- `t` 废弃 (只 flash 提示); 主题/音量/倍速/歌词延迟/睡眠定时/目录/缓存/版本全在 `4` 设置视图
+  (设置行: 0 主题 / 1 音量 / 2 倍速 / 3 歌词延迟 / 4 睡眠定时 / 5 音乐目录 / 6 缓存 / 7 版本只读)。
+- `r`/`a` 在歌单视图是重命名/加歌; 倍速/歌词延迟只在设置视图 `←/→` 步进 0.25
+  (歌词延迟 -5~5s, 负=提前/正=滞后)。
+- 音量 `+`/`-` 即时 `saveConfig({ volume })`; 倍速调整 `saveConfig({ speed })`; 歌词延迟 `saveConfig({ lyric_delay })`。
 - 新增键: `z` 睡眠定时循环 (15/30/60/90 分钟, 0=关, 全视图可用) · `i` 歌曲信息弹层 ·
   `g`/`G` 列表首/尾 (vim 风格)。
 

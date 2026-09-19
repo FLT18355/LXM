@@ -1,6 +1,6 @@
 {
   "name": "lxm-tui",
-  "version": "r-0.4",
+  "version": "r-0.5",
   "description": "本地音乐播放器 (OpenTUI + mpv)",
   "type": "module",
   "module": "index.ts",
@@ -12,7 +12,7 @@
     "test": "bun tests/ui-test.ts && bun tests/theme-test.ts && bun tests/playlist-test.ts && bun tests/regress-test.ts && bun tests/regress2-test.ts && bun tests/loop-test.ts && bun tests/cache-test.ts && bun tests/features-test.ts"
   },
   "dependencies": {
-    "@opentui/core": "^0.5.4"
+    "@opentui/core": "^0.5.11"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0"

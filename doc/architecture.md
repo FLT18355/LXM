@@ -2,7 +2,7 @@
 
 > Bun + TypeScript + `@opentui/core` 终端播放器, 引擎是外部 `mpv` (unix socket JSON IPC)。
 > 从 Python curses 版 `lxm.py` 移植, 配置兼容。
-> 版本: r-0.4 (index.ts HELP / `--version` / package.json 三处一致)
+> 版本: r-0.5 — 唯一来源 `src/version.ts` (index.ts / ui.ts 引用; package.json 手动同步)
 
 ## 目录结构
 
@@ -10,8 +10,10 @@
 index.ts              入口: CLI / mpv 拉起 / renderer / 100ms 主循环 / 退出清理
 src/
   config.ts           config.toml 读写 (自研 TOML 子集)
-  cache.ts            缓存目录 ~/.cache/lxmusic/ (state.toml / scan-cache.toml)
+  cache.ts            缓存目录 ~/.cache/lxmusic/ (state.toml / scan-cache.toml / plays.toml)
   scanner.ts          音乐目录递归扫描 (带缓存) + 文件名工具
+  version.ts          版本号唯一来源 (改版本只动这里)
+  duration.ts         probeDurations: 独立 mpv 实例后台批量探测歌曲时长
   lrc.ts              LRC 解析 (多时间戳 / offset / 头部 tag)
   mpv.ts              MpvClient: JSON IPC, 事件驱动 + request_id 响应匹配
   player.ts           Player: 全部播放状态与逻辑, 不含 UI
@@ -46,12 +48,13 @@ dist/ dist-js/        构建产物, 勿手改
 5. 拉起 mpv: `Bun.spawn(["mpv","--idle=yes","--no-video", --input-ipc-server=...,
    "--terminal=no","--quiet","--no-config","--volume=100"])`; `waitForSocket` 轮询 5s。
 6. `MpvClient.connect` (40 次 × 100ms 重试)。
-7. `new Player(mpv)`: 注入 playlist/queue, 从 config 恢复 volume/speed/theme/favorites;
+7. `new Player(mpv)`: 注入 playlist/queue, 从 config 恢复 volume/speed/lyric_delay/theme/favorites;
    断点续播从**缓存 state.toml** 读 (旧 config 同名键自动迁移; pendingSeek 等 time-pos>0.2 后 seek)。
 8. `new PlayerUI(renderer, player, theme)`; `ui.onQuit = () => shutdown(0)`。
-9. 主循环: `setInterval(() => ui.tick(), 100)`。
-10. 退出统一走 `shutdown(code)` (幂等 `exited`): 清 interval → `player.saveState()` →
-    `mpv.close()` → `renderer.destroy()` → kill mpv (2s 宽限后 kill(9)) → 删 socket →
+9. mpv 就绪后启动 `probeDurations(playlist, …)` — 独立 mpv 实例后台逐首探测时长 (列表右侧显示), 不阻塞 UI。
+10. 主循环: `setInterval(() => ui.tick(), 100)`。
+11. 退出统一走 `shutdown(code)` (幂等 `exited`): 清 interval → `player.saveState()` →
+    `mpv.close()` → `renderer.destroy()` → kill 探测进程 + mpv (2s 宽限后 kill(9)) → 删 socket →
     `process.exit`。SIGINT/SIGTERM/renderer destroy/mpv 意外退出都接这里 (mpv 未启动时 mpvProc 为 null, kill 跳过)。
 
 ## 其他专题

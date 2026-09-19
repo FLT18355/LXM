@@ -4,7 +4,7 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
-import { saveState as saveCacheState, bumpPlay, loadPlays } from "./cache"
+import { saveState as saveCacheState, bumpPlay, loadPlays, saveDuration, loadDurations } from "./cache"
 import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
 import type { MpvClient } from "./mpv"
 
@@ -45,6 +45,8 @@ export class Player {
   volume = 100
   muted = false
   speed = 1.0
+  /** 歌词延迟 (秒): 正=歌词滞后声音, 负=歌词提前声音; -5~5s, 步进 0.25 */
+  lyricDelay = 0
   favorites: string[] = []
   favMode = false
 
@@ -61,6 +63,11 @@ export class Player {
   // 切歌中: 抑制旧文件的 end-file 事件, 避免多米诺切歌
   suppressEndFile = false
   private suppressTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 每首歌时长缓存 (秒): 播放时回填 + 后台探测渐进填充, 列表右侧显示用 */
+  private durations = new Map<string, number>()
+  /** 列表时长数据更新时的通知回调 (UI 用它刷新列表) */
+  onDurationsUpdated: (() => void) | null = null
 
   // UI 状态 (由 UI 每帧更新)
   timePos = 0
@@ -248,6 +255,11 @@ export class Player {
     await this.mpv.setProperty("speed", this.speed)
   }
 
+  /** 歌词延迟: -5~5s, 步进 0.25 取整 (正=滞后/负=提前, 无需动 mpv) */
+  setLyricDelay(d: number): void {
+    this.lyricDelay = Math.max(-5, Math.min(5, Math.round(d * 100) / 100))
+  }
+
   async seek(sec: number): Promise<void> {
     if (this.playing) await this.mpv.seek(sec)
   }
@@ -328,6 +340,28 @@ export class Player {
   /** 某首歌的播放次数 (内存版; 没播过返回 0) */
   playCountOf(path: string | null): number {
     return path ? this.playCounts.get(path) ?? 0 : 0
+  }
+
+  // ---------- 时长缓存 (播放回填 + 后台探测, 持久化到 durations.toml) ----------
+
+  /** 启动时从缓存载入全部时长 (避免每次重新探测) */
+  loadDurations(): void {
+    this.durations = new Map(loadDurations().map((x) => [x.path, x.dur]))
+  }
+
+  /** 记录某歌时长: 更新内存 + 写缓存 + 通知 UI (值一致则不触发) */
+  noteDuration(path: string | null, dur: number): void {
+    if (!path || !(dur > 0)) return
+    const sec = Math.round(dur)
+    if (this.durations.get(path) === sec) return
+    this.durations.set(path, sec)
+    saveDuration(path, sec)
+    this.onDurationsUpdated?.()
+  }
+
+  /** 某首歌时长 (秒); 未知返回 0 */
+  durationOf(path: string | null): number {
+    return path ? this.durations.get(path) ?? 0 : 0
   }
 
   // ---------- 睡眠定时器 ----------

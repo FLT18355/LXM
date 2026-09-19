@@ -71,6 +71,16 @@ const p2 = new Player(fakeMpv)
 p2.loadPlayCounts()
 check("重启后内存载入正确", p2.playCountOf("/m/稻香.mp3") === 2 && p2.playCountOf("/m/雾里.flac") === 1)
 
+// ---------- 2.5 时长缓存: noteDuration 取整写盘 → 新 Player 读回 ----------
+check("初始 durationOf 为 0", p.durationOf("/m/稻香.mp3") === 0)
+p.noteDuration("/m/稻香.mp3", 231.6)
+check("noteDuration 取整存入内存", p.durationOf("/m/稻香.mp3") === 232)
+p.noteDuration("/m/雾里.flac", 180)
+const p3 = new Player(fakeMpv)
+p3.loadDurations()
+check("时长持久化并被新 Player 读回", p3.durationOf("/m/稻香.mp3") === 232 && p3.durationOf("/m/雾里.flac") === 180)
+check("未探测歌曲 durationOf 为 0", p3.durationOf("/m/平凡之路.ogg") === 0)
+
 // ---------- 3. 睡眠定时器预设循环 ----------
 check("初始睡眠关闭", p2.sleepUntil === null && p2.sleepMinutes === 0)
 // 先给 UI 测试用的 p2 加个播放列表 (播放次数来自磁盘载入: 稻香×2, 雾里×1)
@@ -111,8 +121,8 @@ ui.tick()
 await setup.renderOnce()
 const frameHas = (sub: string) => setup.captureCharFrame().includes(sub)
 
-// 播放次数行内显示 (稻香播过 2 次)
-check("列表行显示播放次数 ♪2", frameHas("稻香.mp3") && frameHas("\uF001 2"))
+// 播放次数行内显示 (稻香播过 2 次); 列表已去扩展名
+check("列表行显示播放次数 ♪2", frameHas("稻香") && frameHas("\uF001 2"))
 
 // 设置视图: 6 行 + 睡眠定时行
 p2.sleepMinutes = 0

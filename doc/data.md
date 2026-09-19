@@ -5,7 +5,7 @@
 - 自研 TOML **子集**解析器 (`parseToml`): 只支持顶层 `key = value`
   (字符串/数字/布尔/单行字符串数组), **不支持嵌套表** — 所以歌单放独立文件。
 - `saveConfig(patch)` = 读旧 → 合并 → 整文件重写 (带固定头)。写失败静默 ignore。
-- 已知键: `music_directory` `favorites[]` `theme` `volume` `speed`。
+- 已知键: `music_directory` `favorites[]` `theme` `volume` `speed` `lyric_delay`。
   (`last_path`/`last_pos` 已迁移到缓存 state.toml)
 - 与 Python 版 lxm.py 共用, 保持键名 snake_case, 别改格式。
 
@@ -21,7 +21,10 @@
   发起播放 +1; 导航栏"共播放 N 次"显示总量。启动时全量载入内存
   (`player.loadPlayCounts()`, 见 player.md), 列表行/正在播放卡片/歌曲信息弹层
   都用内存版 `playCountOf`。
-- 清空: `bun index.ts cache --clear` 或设置视图缓存行 Enter。
+- `durations.toml` — 歌曲时长缓存 (`[[durations]]` 子表: path + dur 秒)。播放时回填 +
+  后台 `probeDurations` 探测 (`noteDuration` → `saveDuration` 写盘)。启动 `loadDurations()`
+  载入内存, 列表右侧时长直接显示, **已缓存的不再探测** (省启动/加载时间)。
+- 清空: `bun index.ts cache --clear` 或设置视图缓存行 Enter (清空后时长会重新探测)。
 - 环境变量 `LXM_CACHE_DIR` 可重定向 (测试隔离用)。
 
 ## ~/.config/lxmusic/playlists.toml (src/playlists.ts)
