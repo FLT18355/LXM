@@ -121,6 +121,13 @@ function metaOf(path: string, dur: number): string {
   return `${extOf(path)}  ${dur > 0 ? `${Math.round(dur)}s` : "--"}`
 }
 
+/** 音量小条 (单块字符): 0 → ▁, 100+ → █ */
+function volGlyph(v: number): string {
+  const chars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+  const i = Math.max(0, Math.min(chars.length - 1, Math.round((v / 100) * (chars.length - 1))))
+  return chars[i]
+}
+
 function fmt(sec: number): string {
   sec = Math.max(0, Math.floor(sec))
   return `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`
@@ -164,10 +171,14 @@ export class PlayerUI {
   private nowTitleText!: TextRenderable
   private progressText!: TextRenderable
   private timeText!: TextRenderable
+  private nowDivider!: TextRenderable
   private lyricInner!: BoxRenderable
+  private lyricsBox!: BoxRenderable
   private lyricRows: TextRenderable[] = []
   private plTitle!: TextRenderable
-  private plRows: Array<{ box: BoxRenderable; text: TextRenderable; meta: TextRenderable }> = []
+  private plDivider!: TextRenderable
+  private lastPlDivW = -1
+  private plRows: Array<{ box: BoxRenderable; num: TextRenderable; text: TextRenderable; meta: TextRenderable }> = []
   private scrollbox!: ScrollBoxRenderable
   private statusLeft!: TextRenderable
   private statusRight!: TextRenderable
@@ -252,7 +263,18 @@ export class PlayerUI {
     header.add(this.headRightText)
     root.add(header)
 
-    // ── 正在播放卡片 ──
+    // ── 顶部渐变色彩线 (品牌点缀) ──
+    const accent = new BoxRenderable(r, {
+      height: 1,
+      flexDirection: "row",
+      backgroundColor: this.theme.base,
+    })
+    for (const c of [this.theme.sky, this.theme.lavender, this.theme.pink, this.theme.peach, this.theme.yellow, this.theme.green]) {
+      accent.add(new BoxRenderable(r, { flexGrow: 1, backgroundColor: c }))
+    }
+    root.add(accent)
+
+    // ── 正在播放卡片 (紧凑: 减内边距, 底部加渐变分隔线) ──
     this.nowPlayBox = new BoxRenderable(r, {
       flexDirection: "column",
       backgroundColor: this.theme.crust,
@@ -262,12 +284,12 @@ export class PlayerUI {
       titleColor: this.theme.sky,
       paddingLeft: 2,
       paddingRight: 2,
-      paddingTop: 1,
-      paddingBottom: 1,
+      paddingTop: 0,
+      paddingBottom: 0,
       marginLeft: 1,
       marginRight: 1,
       marginTop: 1,
-      gap: 1,
+      gap: 0,
     })
     const nowRow1 = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1 })
     this.nowStatusText = new TextRenderable(r, { content: "\uF04D 待机", fg: this.theme.subtext, selectable: false })
@@ -290,10 +312,13 @@ export class PlayerUI {
     this.timeText = new TextRenderable(r, { content: "00:00 / 00:00  0%", fg: this.theme.subtext, selectable: false })
     this.timeBox.add(this.timeText)
     this.nowPlayBox.add(this.timeBox)
+    // 渐变分隔线 (卡片底部点缀; 内容在 tick 里按进度条宽度刷新)
+    this.nowDivider = new TextRenderable(r, { content: "", selectable: false })
+    this.nowPlayBox.add(this.nowDivider)
     root.add(this.nowPlayBox)
 
-    // ── 歌词区 ──
-    const lyricsBox = new BoxRenderable(r, {
+    // ── 歌词区 (无歌词/关闭时 tick 里 visible=false 自动收起, 让列表更大) ──
+    this.lyricsBox = new BoxRenderable(r, {
       id: "lyricsBox",
       flexDirection: "column",
       flexGrow: 1,
@@ -310,9 +335,9 @@ export class PlayerUI {
       padding: 0,
     })
     const lyricInner = new BoxRenderable(r, { flexDirection: "column", flexGrow: 1, paddingLeft: 2, paddingRight: 2 })
-    lyricsBox.add(lyricInner)
+    this.lyricsBox.add(lyricInner)
     this.lyricInner = lyricInner
-    root.add(lyricsBox)
+    root.add(this.lyricsBox)
 
     // ── 视图切换 tab (播放列表 / 收藏 / 歌单) ──
     this.tabBar = new BoxRenderable(r, {
@@ -373,6 +398,9 @@ export class PlayerUI {
     })
     this.plTitle = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, paddingLeft: 1 })
     plBox.add(this.plTitle)
+    // 标题下的细分隔线 (宽度在 tick 里按布局刷新)
+    this.plDivider = new TextRenderable(r, { content: "", fg: this.theme.surface1, selectable: false, paddingLeft: 1 })
+    plBox.add(this.plDivider)
     this.scrollbox = new ScrollBoxRenderable(r, {
       id: "scrollbox",
       flexGrow: 1,
@@ -1630,12 +1658,16 @@ export class PlayerUI {
         height: 1,
         flexDirection: "row",
         alignItems: "center",
-        paddingLeft: 2,
+        paddingLeft: 1,
         backgroundColor: this.theme.base,
         onMouseDown: () => {
           this.onRowClick(rowIdx)
         },
       })
+      // 序号 / 播放标记列 (固定宽度, 右对齐)
+      const num = new TextRenderable(this.renderer, { content: "", selectable: false, wrapMode: "none" })
+      box.add(num)
+      // 标题列 (弹性, 超长滚动)
       const text = new TextRenderable(this.renderer, {
         content: "",
         selectable: false,
@@ -1643,6 +1675,7 @@ export class PlayerUI {
         wrapMode: "none",
       })
       box.add(text)
+      // 右列元信息 (格式 + 时长)
       const meta = new TextRenderable(this.renderer, {
         content: "",
         selectable: false,
@@ -1652,7 +1685,7 @@ export class PlayerUI {
       })
       box.add(meta)
       this.scrollbox.add(box)
-      this.plRows.push({ box, text, meta })
+      this.plRows.push({ box, num, text, meta })
     }
   }
 
@@ -1690,9 +1723,12 @@ export class PlayerUI {
     }
   }
 
-  /** 当前视图每行数据: 返回 [marker, text, meta, isPlaying] (meta=右侧格式/时长) */
-  private rowAt(i: number): { marker: string; text: string; meta: string; playing: boolean } {
+  /** 当前视图每行数据: { marker, num, text, meta, playing }
+   *  num = 右对齐序号列; text = 标题 (超长滚动); meta = 右侧格式/时长 */
+  private rowAt(i: number): { marker: string; num: string; text: string; meta: string; playing: boolean } {
     const p = this.p
+    const numW = Math.max(2, String(Math.max(1, this.listCount())).length)
+    const idxStr = String(i + 1).padStart(numW, " ")
     if (this.view === "settings") {
       const vol = p.volume
       const filled = Math.round((vol / 150) * 20)
@@ -1708,35 +1744,37 @@ export class PlayerUI {
         `缓存目录    ${clipWidth(CACHE_DIR, 90)}  (Enter 查看/清空)`,
         `版本        ${VERSION}  (只读 · 帮助 h 查看更多)`,
       ]
-      return { marker: " ", text: rows[i] || "", meta: "", playing: false }
+      return { marker: " ", num: "", text: rows[i] || "", meta: "", playing: false }
     }
     if (this.view === "pl") {
       if (this.plLevel === "list") {
         const list = p.playlists
         const pl = list[i]
-        if (!pl) return { marker: " ", text: "", meta: "", playing: false }
-        return { marker: " ", text: `${String(i + 1).padStart(2, " ")} ${pl.name}  (${pl.paths.length} 首)`, meta: "", playing: false }
+        if (!pl) return { marker: " ", num: "", text: "", meta: "", playing: false }
+        return { marker: " ", num: idxStr, text: `${pl.name}  (${pl.paths.length} 首)`, meta: "", playing: false }
       }
       if (this.plPickerMode) {
         const path = p.playlist[i]
-        if (!path) return { marker: " ", text: "", meta: "", playing: false }
+        if (!path) return { marker: " ", num: "", text: "", meta: "", playing: false }
         const inPl = this.plCurrent ? p.playlistPaths(this.plCurrent).includes(path) : false
         return {
           marker: inPl ? "\uF067" : " ",
-          text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}`,
+          num: idxStr,
+          text: titleOf(path),
           meta: metaOf(path, p.durationOf(path)),
           playing: i === p.idx,
         }
       }
       // detail
-      if (!this.plCurrent) return { marker: " ", text: "", meta: "", playing: false }
+      if (!this.plCurrent) return { marker: " ", num: "", text: "", meta: "", playing: false }
       const paths = p.playlistPaths(this.plCurrent)
       const path = paths[i]
-      if (!path) return { marker: " ", text: "", meta: "", playing: false }
+      if (!path) return { marker: " ", num: "", text: "", meta: "", playing: false }
       const realIdx = p.playlist.indexOf(path)
       return {
         marker: " ",
-        text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}`,
+        num: idxStr,
+        text: titleOf(path),
         meta: metaOf(path, p.durationOf(path)),
         playing: realIdx === p.idx,
       }
@@ -1744,14 +1782,15 @@ export class PlayerUI {
     // list / fav
     const useQueue = this.searchActive || this.view === "fav" || p.favMode
     const orig = useQueue ? p.queue[i] : i
-    if (orig === undefined || !p.playlist[orig]) return { marker: " ", text: "", meta: "", playing: false }
+    if (orig === undefined || !p.playlist[orig]) return { marker: " ", num: "", text: "", meta: "", playing: false }
     const path = p.playlist[orig]
     const fav = p.favorites.includes(path)
     const cnt = p.playCountOf(path)
     const cntStr = cnt > 0 ? ` \uF001 ${cnt}` : ""
     return {
       marker: orig === p.idx ? "\uF04B" : " ",
-      text: `${String(i + 1).padStart(2, " ")} ${titleOf(path)}${fav ? " \uF004" : ""}${cntStr}`,
+      num: idxStr,
+      text: `${titleOf(path)}${fav ? " \uF004" : ""}${cntStr}`,
       meta: metaOf(path, p.durationOf(path)),
       playing: orig === p.idx,
     }
@@ -1765,30 +1804,31 @@ export class PlayerUI {
     const availW = typeof this.scrollbox.width === "number" && this.scrollbox.width > 1 ? this.scrollbox.width : 100
     for (let i = 0; i < n; i++) {
       const row = this.plRows[i]
-      const { marker, text, meta, playing } = this.rowAt(i)
+      const { marker, num, text, meta, playing } = this.rowAt(i)
       const isSel = i === this.sel
+      const hasMark = marker.trim() !== ""
       const metaW = displayWidth(meta)
-      const nameW = Math.max(10, availW - metaW - 5)
-      // marker + 序号固定, 歌名部分超长时滚动 (marquee), 否则截断
-      const sp = text.indexOf(" ", 1)
-      const head = sp === -1 ? text : text.slice(0, sp) // " 01"
-      const rest = sp === -1 ? "" : text.slice(sp + 1)  // 歌名 + ♥ + ♪N
-      const shown =
-        isSel || playing ? scrollText(rest, nameW - displayWidth(head), this.tickCount)
-        : clipWidth(rest, nameW - displayWidth(head))
-      const line = `${marker}${head} ${shown}`
+      const numW2 = displayWidth(num) + (num ? 1 : 0) + (hasMark ? 2 : 0)
+      const nameW = Math.max(8, availW - metaW - numW2 - 4)
+      // 标题超长时滚动 (marquee); 仅选中/播放行滚动, 其余截断
+      const shown = isSel || playing ? scrollText(text, nameW, this.tickCount) : clipWidth(text, nameW)
       const box = row.box
+      const markStr = hasMark ? `${marker} ` : ""
+      const numCol = num ? `${num} ` : ""
       if (isSel) {
         box.backgroundColor = this.theme.surface1
-        row.text.content = t`${fg(this.theme.text)(bold(line))}`
+        row.num.content = t`${fg(this.theme.green)(markStr)}${bold(fg(this.theme.sky)(numCol))}`
+        row.text.content = t`${bold(fg(this.theme.text)(shown))}`
         row.meta.content = t`${fg(this.theme.text)(meta)}`
       } else if (playing) {
         box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.green)(bold(line))}`
+        row.num.content = t`${fg(this.theme.green)(markStr)}${fg(this.theme.overlay)(numCol)}`
+        row.text.content = t`${bold(fg(this.theme.green)(shown))}`
         row.meta.content = t`${fg(this.theme.green)(meta)}`
       } else {
         box.backgroundColor = this.theme.base
-        row.text.content = t`${fg(this.theme.text)(line)}`
+        row.num.content = t`${fg(this.theme.overlay)(numCol)}`
+        row.text.content = t`${fg(this.theme.text)(shown)}`
         row.meta.content = t`${fg(this.theme.overlay)(meta)}`
       }
     }
@@ -1833,6 +1873,15 @@ export class PlayerUI {
       p.paused = true
       this.flash("\uF017 睡眠定时器到点啦喵~ 已自动暂停", 3)
       this.updatePlaylist()
+    }
+
+    // 布局维护: 歌词区无内容时自动收起 (让列表更大); 列表标题分隔线宽度更新
+    const lyricOn = p.showLyrics && p.lyrics.length > 0
+    if (this.lyricsBox.visible !== lyricOn) this.lyricsBox.visible = lyricOn
+    const plW = Math.max(0, Math.floor(this.scrollbox.width || 0))
+    if (plW !== this.lastPlDivW) {
+      this.lastPlDivW = plW
+      this.plDivider.content = plW > 2 ? t`${fg(this.theme.surface1)("─".repeat(plW - 1))}` : ""
     }
 
     // 等化器动画
@@ -1903,9 +1952,10 @@ export class PlayerUI {
         this.statusLeft.fg = this.theme.subtext
       }
     }
+    const volGlyphStr = p.muted ? "\uF026 静音" : `${volGlyph(p.volume)} ${p.volume}`
     this.statusRight.content = p.playing
-      ? clipWidth(` ${p.currentBase()} · ${String(p.idx + 1)}/${p.playlist.length} `, 60)
-      : clipWidth(` 共 ${p.playlist.length} 首 `, 60)
+      ? clipWidth(` ${p.currentBase()} · ${String(p.idx + 1)}/${p.playlist.length} · ${volGlyphStr} `, 60)
+      : clipWidth(` 共 ${p.playlist.length} 首 · ${volGlyphStr} `, 60)
 
     // 淡入淡出
     p.updateFade()
@@ -1936,21 +1986,32 @@ export class PlayerUI {
     // 终端尺寸自适应: 窄终端下截断长标题, 防溢出
     this.nowTitleText.content = clipWidth(title, 80)
 
-    const innerW = (this.timeBox.width || 20) - (this.timeText.width || 18) - 2
+    const innerW = (this.timeBox.width || 20) - (this.timeText.width || 18) - 3
     const barw = Math.max(6, Math.min(60, innerW))
     const dur = p.duration
     const tpos = p.timePos
     const pct = dur > 0 ? Math.max(0, Math.min(1, tpos / dur)) : 0
-    const filled = Math.round(barw * pct)
-    const seg = Math.max(1, Math.floor(barw / 3))
-    const f1 = Math.min(filled, seg)
-    const f2 = Math.min(Math.max(filled - seg, 0), seg)
-    const f3 = Math.max(filled - seg - seg, 0)
-    const rest = Math.max(barw - filled, 0)
-    this.progressText.content = t`${fg(this.theme.sky)("█".repeat(f1))}${fg(this.theme.lavender)("█".repeat(f2))}${fg(this.theme.pink)("█".repeat(f3))}${fg(this.theme.surface1)("░".repeat(rest))}`
+    // 8x 高分辨率: 用 9 段分数块 ▏▎▍▌▋▊▉█ 平滑填充
+    const FRAC = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+    const units = Math.round(barw * 8 * pct)
+    const full = Math.floor(units / 8)
+    const rem = units % 8
+    const f1 = Math.min(full, Math.ceil(barw / 3))
+    const f2 = Math.min(Math.max(full - f1, 0), Math.ceil(barw / 3))
+    const f3 = Math.max(full - f1 - f2, 0)
+    const p1 = f1 === full ? FRAC[rem] : ""
+    const p2 = f2 > 0 && f1 + f2 === full ? FRAC[rem] : ""
+    const p3 = f3 > 0 && f1 + f2 + f3 === full ? FRAC[rem] : ""
+    const tail = Math.max(barw - full - (rem ? 1 : 0), 0)
+    this.progressText.content = t`${fg(this.theme.sky)("█".repeat(f1) + p1)}${fg(this.theme.lavender)("█".repeat(f2) + p2)}${fg(this.theme.pink)("█".repeat(f3) + p3)}${fg(this.theme.surface1)("░".repeat(tail))}`
     const durText = dur > 0 ? fmt(dur) : "--:--"
     const pctText = dur > 0 ? String(Math.round(pct * 100)).padStart(3) : "---"
     this.timeText.content = ` ${fmt(tpos)} / ${durText}  ${pctText}% `
+    // 卡片底部渐变分隔线 (铺满卡片内宽)
+    const cardW = Math.max(8, (this.nowPlayBox.width || 80) - 7)
+    const d1 = Math.floor(cardW / 3)
+    const d2 = Math.floor((cardW - d1) / 2)
+    this.nowDivider.content = t`${fg(this.theme.sky)("╸".repeat(Math.max(1, d1)))}${fg(this.theme.lavender)("╸".repeat(Math.max(1, d2)))}${fg(this.theme.pink)("╸".repeat(Math.max(1, cardW - d1 - d2)))}`
   }
 
   /** 更新歌词区 (当前句高亮居中) */
@@ -2050,7 +2111,8 @@ export class PlayerUI {
     // 同一时间戳的多句一起高亮
     const curTime = p.lyrics[cur].time
     const MID = Math.floor(this.fullLyricRows.length / 2)
-    const fullMaxW = Math.max(20, (this.fullOverlay.width || 80) - 12)
+    const ow = this.fullOverlay.width
+    const fullMaxW = Math.max(30, (typeof ow === "number" && ow > 30 ? ow : this.renderer.width || 100) - 14)
     for (let r = 0; r < this.fullLyricRows.length; r++) {
       const offset = r - MID
       const idx = cur + offset
