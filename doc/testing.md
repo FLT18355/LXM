@@ -11,8 +11,12 @@
   未计算, `updateLyrics` 会早退。验证渲染结果用 `captureCharFrame()` 做文本/缩进断言
   (StyledText 的 `content` 不是纯字符串, `String()` 拿不到)。
 - 测试会 `saveConfig` 落盘 (如 speed), 跑之前备份 `~/.config/lxmusic/config.toml`。
+  （需要完全隔离的新测试可走 `LXM_CONFIG_FILE` 环境变量, 见 track-ops-test.ts。）
+- track-ops-test.ts 会**真的改名/删除磁盘文件**, 所以它的 env 模块同时把
+  `LXM_CACHE_DIR`/`LXM_PLAYLISTS_FILE`/`LXM_CONFIG_FILE`/音乐目录指向进程临时目录;
+  新增同类测试必须沿用这套隔离 (绝不碰主人真实音乐库)。
 - 没有 git 仓库。改动前评估可回滚性, 大改先复制备份。
-- 运行: `bun run test` (package.json 链式跑 7 个)。`bun test` 原生 runner **不识别**
+- 运行: `bun run test` (package.json 链式跑 9 个)。`bun test` 原生 runner **不识别**
   `*-test.ts` 命名, 勿改用。
 
 ## 测试文件
@@ -27,3 +31,4 @@
 | loop-test.ts | 单曲循环走 set_property, loadfile 不传 options |
 | cache-test.ts | 缓存 state 读写 / scan-cache mtime 校验 / clearCache |
 | features-test.ts | 播放次数内存缓存 (loadPlayCounts/playIndex 同步) / 睡眠定时器 (cycleSleep/到点) / z 键与信息弹层渲染 |
+| track-ops-test.ts | 歌曲文件操作: renameTrack/deleteTrack 全链路同步 (playlist/favorites/playlists/plays/durations/state/scan-cache) / 队列重编号 / R-D 弹层 |

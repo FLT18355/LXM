@@ -7,8 +7,8 @@ import { extname } from "path"
 export type LyricLine = { time: number; text: string }
 export type LyricTag = [string, string]
 
-/** 查找与音频同名的 .lrc 文件 */
-export async function findLrc(path: string): Promise<string | null> {
+/** 查找与音频同名的 .lrc 文件 (同步; 播放载入与歌曲改名/删除共用) */
+export function findLrc(path: string): string | null {
   const root = path.slice(0, path.length - extname(path).length)
   for (const cand of [root + ".lrc", root + ".LRC"]) {
     try {

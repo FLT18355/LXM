@@ -8,6 +8,7 @@
 - 已知键: `music_directory` `favorites[]` `theme` `volume` `speed` `lyric_delay`。
   (`last_path`/`last_pos` 已迁移到缓存 state.toml)
 - 与 Python 版 lxm.py 共用, 保持键名 snake_case, 别改格式。
+- 环境变量 `LXM_CONFIG_FILE` 可重定向 (测试隔离用, 在 CONFIG_DIR 路径上覆盖)。
 
 ## ~/.cache/lxmusic/ (缓存目录, src/cache.ts)
 
@@ -17,6 +18,9 @@
   启动恢复。旧 config.toml 同名键启动时一次性迁移并清出。
 - `scan-cache.toml` — 音乐目录扫描结果 (dir + mtime + files[])。启动用
   `scanner.scanDirectoryCached()`: 目录 mtime 不变则复用, 否则重扫更新。
+  **歌曲改名/删除 (`R`/`D`) 后必须 `renameInScanCache`/`dropFromScanCache` 手动同步**:
+  mtime 只看音乐目录**根**, 子目录里的文件动了根 mtime 不变, 不同步就会在下次启动
+  复用旧路径列表 (幽灵条目/新名丢失)。
 - `plays.toml` — 播放次数统计 (`[[plays]]` 子表: path + count)。每次 `playIndex`
   发起播放 +1; 导航栏"共播放 N 次"显示总量。启动时全量载入内存
   (`player.loadPlayCounts()`, 见 player.md), 列表行/正在播放卡片/歌曲信息弹层
@@ -25,6 +29,8 @@
   后台 `probeDurations` 探测 (`noteDuration` → `saveDuration` 写盘)。启动 `loadDurations()`
   载入内存, 列表右侧时长直接显示, **已缓存的不再探测** (省启动/加载时间)。
 - 清空: `bun index.ts cache --clear` 或设置视图缓存行 Enter (清空后时长会重新探测)。
+- **改名/删除同步**: plays.toml / durations.toml 以绝对路径为键, 歌曲文件改名或删除后由
+  `renameTrackData`/`dropTrackData` 同步 (改名是键搬迁, 次数相加; 删除是清条目)。
 - 环境变量 `LXM_CACHE_DIR` 可重定向 (测试隔离用)。
 
 ## ~/.config/lxmusic/playlists.toml (src/playlists.ts)

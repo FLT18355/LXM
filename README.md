@@ -17,6 +17,7 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm
   - 静音切换（M 或 0）· 进度条鼠标点击/拖动定位
 - 歌词延迟对齐（设置第 4 行 ←/→ 步进 0.25s，-5~5s，自动保存；歌词不同步时微调）
 - 歌曲信息弹层（`i` 查看歌名/艺术家/格式/时长/路径/播放次数/模式/音量倍速）
+- 歌曲文件编辑：`R` 重命名选中歌曲（改磁盘文件名 + 同名 `.lrc`，弹层输入）、`D` 删除选中歌曲（确认弹层，删磁盘文件）；列表/收藏/歌单视图都能用，同步更新收藏、歌单、播放次数、时长缓存、断点续播与扫描缓存
 - 行内播放次数（列表/收藏每行显示 ♪N，正在播放卡片显示"已播放 N 次"）
 - 列表右列元信息：每首歌显示**格式**（扩展名）与**时长**（秒）；歌名不带后缀，超长时行内滚动（选中/播放行）
 - `g`/`G` 跳到列表首/尾（vim 风格导航）
@@ -77,6 +78,7 @@ bun run build:portable  # → dist-js/ (可分发目录 ~67MB, 运行时外置)
 | m | 循环模式切换 | z | 睡眠定时 (15/30/60/90 分钟, 到点自动暂停) |
 | 1 / 2 / 3 / 4 | 切换视图：播放列表 / 收藏 / 歌单 / 设置 | ↑↓ / jk | 选择行 |
 | g / G | 跳到列表首 / 尾 | i | 歌曲信息弹层 |
+| R | 重命名选中歌曲 (改文件名, 同名 .lrc 一起改) | D | 删除选中歌曲 (弹确认, 删磁盘文件) |
 | l / L | 歌词开关 / 全屏歌词 | f | 收藏当前曲 |
 | / | 搜索 (Enter 确认, Esc 取消) | d | 重新扫描目录 |
 | + / - | 音量增 / 减（自动保存） | h | 帮助 (任意键关闭) |
@@ -101,6 +103,7 @@ bun tests/regress2-test.ts # 回归测试 (搜索/收藏模式下切歌)
 bun tests/loop-test.ts     # 回归测试 (单曲循环 loop-file)
 bun tests/cache-test.ts    # 回归测试 (缓存目录读写 / mtime 校验)
 bun tests/features-test.ts # 新功能测试 (播放次数缓存 / 睡眠定时器)
+bun tests/track-ops-test.ts # 歌曲文件操作测试 (重命名 / 删除 + 各持久化同步)
 ```
 
 ## 结构
@@ -118,5 +121,5 @@ src/player.ts     播放器状态与逻辑
 src/playlists.ts  歌单持久化 (TOML 子表数组)
 src/theme.ts      Catppuccin 四口味主题 (Latte/Frappé/Macchiato/Mocha)
 src/ui.ts         OpenTUI 界面 (四视图 tab: 列表/收藏/歌单/设置, 设置内切换主题)
-tests/            无头测试 (ui / theme / playlist / regress / regress2 / loop / cache / features)
+tests/            无头测试 (ui / theme / playlist / regress / regress2 / loop / cache / features / track-ops)
 ```

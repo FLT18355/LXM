@@ -6,7 +6,8 @@ import { join } from "path"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 
 export const CONFIG_DIR = join(homedir(), ".config", "lxmusic")
-export const CONFIG_FILE = join(CONFIG_DIR, "config.toml")
+// 测试可用 LXM_CONFIG_FILE 指向临时文件, 避免读写污染用户真实配置 (同 LXM_PLAYLISTS_FILE 模式)
+export const CONFIG_FILE = process.env["LXM_CONFIG_FILE"] || join(CONFIG_DIR, "config.toml")
 
 export type PlayerConfig = {
   music_directory?: string

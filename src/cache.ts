@@ -150,6 +150,23 @@ export function cacheSize(): number {
 
 export type PlayCount = { path: string; count: number }
 
+/** 整表写回 plays.toml (保留 [[plays]] 子表数组格式) */
+function writePlays(all: PlayCount[]): void {
+  ensureCacheDir()
+  const lines = ["# 播放次数统计 — 由 lxm-tui 自动维护", ""]
+  for (const p of all) {
+    lines.push("[[plays]]")
+    lines.push(`path = "${p.path.replace(/"/g, '\\"')}"`)
+    lines.push(`count = ${p.count}`)
+    lines.push("")
+  }
+  try {
+    writeFileSync(PLAYS_FILE, lines.join("\n"))
+  } catch {
+    /* ignore */
+  }
+}
+
 /** 读取全部播放次数 (无则空数组) */
 export function loadPlays(): PlayCount[] {
   try {
@@ -192,20 +209,7 @@ export function bumpPlay(path: string): number {
   const n = (hit ? hit.count : 0) + 1
   if (hit) hit.count = n
   else all.push({ path, count: n })
-  // 写回: 保留 [[plays]] 子表数组格式
-  ensureCacheDir()
-  const lines = ["# 播放次数统计 — 由 lxm-tui 自动维护", ""]
-  for (const p of all) {
-    lines.push("[[plays]]")
-    lines.push(`path = "${p.path.replace(/"/g, '\\"')}"`)
-    lines.push(`count = ${p.count}`)
-    lines.push("")
-  }
-  try {
-    writeFileSync(PLAYS_FILE, lines.join("\n"))
-  } catch {
-    /* ignore */
-  }
+  writePlays(all)
   return n
 }
 
@@ -226,6 +230,23 @@ export function totalPlays(): number {
 //   dur = 231
 
 export type DurationEntry = { path: string; dur: number }
+
+/** 整表写回 durations.toml (保留 [[durations]] 子表数组格式) */
+function writeDurations(all: DurationEntry[]): void {
+  ensureCacheDir()
+  const lines = ["# 歌曲时长缓存 — 由 lxm-tui 自动维护 (秒)", ""]
+  for (const d of all) {
+    lines.push("[[durations]]")
+    lines.push(`path = "${d.path.replace(/"/g, '\\"')}"`)
+    lines.push(`dur = ${d.dur}`)
+    lines.push("")
+  }
+  try {
+    writeFileSync(DURATIONS_FILE, lines.join("\n"))
+  } catch {
+    /* ignore */
+  }
+}
 
 /** 读取全部已缓存时长 (无则空数组) */
 export function loadDurations(): DurationEntry[] {
@@ -272,17 +293,74 @@ export function saveDuration(path: string, dur: number): void {
   } else {
     all.push({ path, dur: sec })
   }
-  ensureCacheDir()
-  const lines = ["# 歌曲时长缓存 — 由 lxm-tui 自动维护 (秒)", ""]
-  for (const d of all) {
-    lines.push("[[durations]]")
-    lines.push(`path = "${d.path.replace(/"/g, '\\"')}"`)
-    lines.push(`dur = ${d.dur}`)
-    lines.push("")
+  writeDurations(all)
+}
+
+// ---------- 歌曲改名/删除后的缓存同步 ----------
+// plays.toml / durations.toml 以绝对路径为键: 歌曲改文件名或删除后必须同步,
+// 否则计数与时长挂在已不存在的路径上 (新路径从零重算 / 幽灵条目常驻)。
+
+/** 把 plays/durations 缓存里的 oldPath 改名为 newPath (目标已有条目则合并: 次数相加, 时长保留原值) */
+export function renameTrackData(oldPath: string, newPath: string): void {
+  if (!oldPath || !newPath || oldPath === newPath) return
+  const plays = loadPlays()
+  const hit = plays.find((x) => x.path === oldPath)
+  if (hit) {
+    const exist = plays.find((x) => x.path === newPath)
+    if (exist) {
+      exist.count += hit.count
+      plays.splice(plays.indexOf(hit), 1)
+    } else {
+      hit.path = newPath
+    }
+    writePlays(plays)
   }
-  try {
-    writeFileSync(DURATIONS_FILE, lines.join("\n"))
-  } catch {
-    /* ignore */
+  const durs = loadDurations()
+  const hitDur = durs.find((x) => x.path === oldPath)
+  if (hitDur) {
+    const exist = durs.find((x) => x.path === newPath)
+    if (exist) durs.splice(durs.indexOf(hitDur), 1)
+    else hitDur.path = newPath
+    writeDurations(durs)
   }
+}
+
+/** 删除 plays/durations 缓存里的 path 条目 (歌曲文件删除后调用) */
+export function dropTrackData(path: string): void {
+  if (!path) return
+  const plays = loadPlays()
+  const keptPlays = plays.filter((x) => x.path !== path)
+  if (keptPlays.length !== plays.length) writePlays(keptPlays)
+  const durs = loadDurations()
+  const keptDurs = durs.filter((x) => x.path !== path)
+  if (keptDurs.length !== durs.length) writeDurations(keptDurs)
+}
+
+/** 读取 scan-cache.toml 里 dir 对应的文件列表; dir 不匹配/无缓存返回 null */
+function scanCacheFiles(dir: string): string[] | null {
+  const raw = readTomlFile(SCAN_CACHE_FILE)
+  if (raw["dir"] !== dir || !Array.isArray(raw["files"])) return null
+  return (raw["files"] as unknown[]).filter((x): x is string => typeof x === "string")
+}
+
+/** 目录内文件改名后同步扫描缓存。
+ *  子目录里的文件改名不会改变音乐目录根的 mtime (loadScanCache 只看根), 不手动同步的话
+ *  下次启动会复用旧路径列表 → 列表出现幽灵条目、新名丢失。 */
+export function renameInScanCache(dir: string, oldPath: string, newPath: string): void {
+  const files = scanCacheFiles(dir)
+  if (!files) return
+  const i = files.indexOf(oldPath)
+  if (i === -1) return
+  files[i] = newPath
+  saveScanCache(dir, files.sort())
+}
+
+/** 目录内文件删除后同步扫描缓存 (理由同 renameInScanCache) */
+export function dropFromScanCache(dir: string, path: string): void {
+  const files = scanCacheFiles(dir)
+  if (!files) return
+  const i = files.indexOf(path)
+  if (i === -1) return
+  files.splice(i, 1)
+  saveScanCache(dir, files)
 }

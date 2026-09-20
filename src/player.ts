@@ -4,8 +4,20 @@
 import { baseName, titleOf, dirBase } from "./scanner"
 import { findLrc, parseLrc, type LyricLine, type LyricTag } from "./lrc"
 import { saveConfig } from "./config"
-import { saveState as saveCacheState, bumpPlay, loadPlays, saveDuration, loadDurations } from "./cache"
+import {
+  saveState as saveCacheState,
+  bumpPlay,
+  loadPlays,
+  saveDuration,
+  loadDurations,
+  renameTrackData,
+  dropTrackData,
+  renameInScanCache,
+  dropFromScanCache,
+} from "./cache"
 import { loadPlaylists, savePlaylists, type Playlist } from "./playlists"
+import { existsSync, renameSync, rmSync } from "fs"
+import { dirname, extname, join } from "path"
 import type { MpvClient } from "./mpv"
 
 export type RepeatMode = "OFF" | "ALL" | "ONE"
@@ -138,7 +150,7 @@ export class Player {
   }
 
   async loadLyrics(path: string): Promise<void> {
-    const lrc = await findLrc(path)
+    const lrc = findLrc(path)
     if (lrc) {
       const r = await parseLrc(lrc)
       this.lyrics = r.lines
@@ -317,6 +329,144 @@ export class Player {
       this.queue = Array.from({ length: fresh.length }, (_, i) => i)
     }
     return fresh.length
+  }
+
+  // ---------- 歌曲文件操作 (重命名 / 删除, 见 doc/player.md) ----------
+
+  /** 停止当前播放 (删除正在播的歌曲时用): 用 suppressEndFile 抑制 stop 触发的 end-file 自动切歌 */
+  stopPlayback(): void {
+    this.suppressEndFile = true
+    clearTimeout(this.suppressTimer ?? undefined)
+    this.suppressTimer = setTimeout(() => {
+      this.suppressEndFile = false
+      this.suppressTimer = null
+    }, 2000)
+    void this.mpv.command("stop")
+    this.playing = false
+    this.paused = false
+    this.timePos = 0
+    this.duration = 0
+    this.currentPath = null
+    this.playCount = 0
+    this.lyrics = []
+    this.lyricTags = []
+    this.titleTag = ""
+    this.artistTag = ""
+    this.fadeState = null
+  }
+
+  /** 从播放列表移除下标 k: queue 过滤该下标并对后续下标重编号 (随机/收藏顺序保持), idx 跟随修正 */
+  private removePlaylistIndex(k: number): void {
+    this.playlist.splice(k, 1)
+    this.queue = this.queue.filter((i) => i !== k).map((i) => (i > k ? i - 1 : i))
+    if (this.idx > k) this.idx--
+    else if (this.idx === k) this.idx = Math.min(k, Math.max(0, this.playlist.length - 1))
+  }
+
+  /**
+   * 重命名歌曲文件 (newBase 为不含扩展名的新歌名, 后缀沿用原文件)。
+   * 同名 .lrc 一并改名; 同步 playlist/当前播放/favorites/playlists/plays+durations 缓存/
+   * 扫描缓存/断点续播。文件系统操作失败返回 { ok:false, error }。
+   */
+  renameTrack(oldPath: string, newBase: string): { ok: true; newPath: string } | { ok: false; error: string } {
+    const base = newBase.trim()
+    if (!base) return { ok: false, error: "名字不能为空" }
+    if (base === "." || base === ".." || /[/\\\0]/.test(base))
+      return { ok: false, error: "名字不能含路径分隔符" }
+    if (!existsSync(oldPath)) return { ok: false, error: "文件不存在" }
+    const ext = extname(oldPath)
+    const newPath = join(dirname(oldPath), base + ext)
+    if (newPath === oldPath) return { ok: false, error: "新名字与原名相同" }
+    if (existsSync(newPath)) return { ok: false, error: "已存在同名文件" }
+    try {
+      renameSync(oldPath, newPath)
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "重命名失败" }
+    }
+    const lrc = findLrc(oldPath)
+    if (lrc) {
+      try {
+        renameSync(lrc, newPath.slice(0, newPath.length - ext.length) + extname(lrc))
+      } catch {
+        /* 歌词改名失败不影响歌曲本体 */
+      }
+    }
+    // 引用同步 (绝对路径键): 播放列表 / 正在播放 / 收藏 / 歌单
+    this.playlist = this.playlist.map((x) => (x === oldPath ? newPath : x))
+    if (this.currentPath === oldPath) {
+      this.currentPath = newPath
+      saveCacheState({ last_path: newPath })
+    }
+    if (this.favorites.includes(oldPath)) {
+      this.favorites = this.favorites.map((x) => (x === oldPath ? newPath : x))
+      saveConfig({ favorites: [...this.favorites] })
+    }
+    let plChanged = false
+    for (const pl of this.playlists) {
+      for (let i = 0; i < pl.paths.length; i++) {
+        if (pl.paths[i] === oldPath) {
+          pl.paths[i] = newPath
+          plChanged = true
+        }
+      }
+    }
+    if (plChanged) savePlaylists(this.playlists)
+    // 内存缓存 (内存 Map) + 磁盘缓存 (plays/durations/scan-cache)
+    const cnt = this.playCounts.get(oldPath)
+    if (cnt !== undefined) {
+      this.playCounts.delete(oldPath)
+      this.playCounts.set(newPath, (this.playCounts.get(newPath) ?? 0) + cnt)
+    }
+    const dur = this.durations.get(oldPath)
+    if (dur !== undefined) {
+      this.durations.delete(oldPath)
+      if (!this.durations.has(newPath)) this.durations.set(newPath, dur)
+    }
+    renameTrackData(oldPath, newPath)
+    renameInScanCache(this.musicDir, oldPath, newPath)
+    return { ok: true, newPath }
+  }
+
+  /**
+   * 删除歌曲文件 (正在播放则先停播)。
+   * 同步 playlist/queue/idx/favorites/playlists/播放计数缓存/扫描缓存; 同名 .lrc 一并删除。
+   */
+  deleteTrack(path: string): { ok: true } | { ok: false; error: string } {
+    if (!path) return { ok: false, error: "路径为空" }
+    if (!existsSync(path)) return { ok: false, error: "文件不存在" }
+    try {
+      rmSync(path, { force: true })
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : "删除失败" }
+    }
+    const lrc = findLrc(path)
+    if (lrc) {
+      try {
+        rmSync(lrc, { force: true })
+      } catch {
+        /* 歌词删除失败不影响歌曲本体 */
+      }
+    }
+    if (this.currentPath === path) this.stopPlayback()
+    const k = this.playlist.indexOf(path)
+    if (k !== -1) this.removePlaylistIndex(k)
+    this.totalPlayCount = Math.max(0, this.totalPlayCount - (this.playCounts.get(path) ?? 0))
+    this.playCounts.delete(path)
+    this.durations.delete(path)
+    if (this.favorites.includes(path)) {
+      this.favorites = this.favorites.filter((x) => x !== path)
+      saveConfig({ favorites: [...this.favorites] })
+    }
+    let plChanged = false
+    for (const pl of this.playlists) {
+      const before = pl.paths.length
+      pl.paths = pl.paths.filter((x) => x !== path)
+      if (pl.paths.length !== before) plChanged = true
+    }
+    if (plChanged) savePlaylists(this.playlists)
+    dropTrackData(path)
+    dropFromScanCache(this.musicDir, path)
+    return { ok: true }
   }
 
   // ---------- 状态保存 ----------

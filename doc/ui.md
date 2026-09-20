@@ -11,19 +11,43 @@
 view: "list" | "fav" | "pl" | "settings"   (tab 1/2/3/4 或鼠标点击)
 plLevel: "list" | "detail"                  (歌单 tab 内二级)
 plPickerMode                                 (详情内 a 加歌选歌, 数据源=全库 playlist)
-plDialogMode: "new" | "rename" | "set-dir" | null  (居中输入弹层)
+plDialogMode: "new" | "rename" | "rename-song" | "set-dir" | null  (居中输入弹层)
+confirmAction: (() => void) | null           (删除歌曲确认弹层; 非 null 时独占按键)
 ```
+
+- 歌曲文件编辑 (R 重命名 / D 删除) 见下方「歌曲文件编辑」小节。
 
 - 每视图游标独立: `savedListSel`/`savedFavSel` 在 `setView` 离开时存、进入时恢复。
 - `searchActive` 是叠加在 list/fav 上的过滤态 (queue 换成搜索结果), 进视图切换会清。
 - 全屏歌词 `fullLyrics` 与帮助 `showHelp` 是 absolute overlay (zIndex 200/100), 不是视图;
-  歌曲信息弹层 `showInfo` 是居中卡片 overlay (zIndex 150, `i` 键开, 任意键关)。
+  歌曲信息弹层 `showInfo` 是居中卡片 overlay (zIndex 150, `i` 键开, 任意键关);
+  删除确认弹层 `confirmOverlay` (zIndex 250, `askConfirm` 开); 输入弹层 `plDialogOverlay`
+  (zIndex 300, 新建/重命名歌单 · 重命名歌曲 · 改音乐目录共用)。
 - 帮助 overlay 为分组卡片式: `helpSections` (图标 + 组名 + `[键, 说明]` 列表), 键列按显示宽度
   22 对齐; 标题与底部带 `VERSION` (见 src/version.ts)。加/改帮助项只动 `helpSections`。
 - tab 栏右端 `playsStat` (设置按钮右边) 显示"共播放 N 次", 由 tick 里 `totalPlayCount`
   触发更新 (playIndex 时 +1, 见 data.md plays.toml)。
 - 睡眠定时器: `z` 全局切换预设 (见 player.md), 头部 `headRightText` 实时倒计时,
   tick 里 `sleepExpired()` 到点自动暂停; 设置视图第 4 行可 ←/→ 切换。
+
+## 歌曲文件编辑 (R / D)
+
+`R` 重命名歌曲、`D` 删除歌曲 —— 改的是**磁盘文件**, 不是播放列表条目 (歌单内的
+"移除歌曲" 仍是 `x`)。两者都作用在 `selectedSongPath()` 选中的那首歌:
+
+- `selectedSongPath()`: 视图感知取选中行路径。list/fav 走 `selToPlaylistIdx` (搜索/收藏
+  用 queue); 歌单详情/加歌模式取对应行, 但**不在音乐库中的歌单曲目返回 null**;
+  设置视图/歌单列表级返回 null。返回 null 时只 flash 提示, 不动文件。
+- `R` → 打开输入弹层 (`plDialogMode = "rename-song"`, 预填当前歌名), 目标路径锁在
+  `pendingSongPath` (免受 sel 变动影响); Enter → `player.renameTrack(path, 新名)`;
+  扩展名沿用原文件, 弹层提示里明示。失败 (空名/含路径分隔符/同名/目标已存在) 只 flash。
+- `D` → `askConfirm()` 弹出确认弹层 (`confirmAction` 闭包 + `confirmOverlay`, zIndex 250),
+  **Enter/y 确认 · Esc/n 取消 · 其它键忽略**; 确认后 `player.deleteTrack(path)`。
+- 数据同步与不变量见 [player.md](player.md) 的「歌曲文件操作」; 删除当前播放曲会先停播
+  (`stopPlayback`, 复用 suppressEndFile 抑制 end-file, 不会自动跳下一首)。
+- 删除后 UI 把 `sel` clamp 回 `listCount()-1`; 列表清空 (0 首) 也能安全渲染。
+- `applyTheme` 备份清单里含 `confirmAction`/`confirmMessage`/`pendingSongPath`
+  (重建后 `askConfirm` 重开确认弹层)。
 
 ## 渲染更新管线
 
@@ -73,12 +97,15 @@ view/plLevel/plCurrent/plPickerMode/savedListSel/sel` → 整树 `destroyRecursi
 
 ## 按键路由顺序 (handleKey)
 
-优先级从上到下: 帮助任意键关闭 → 歌曲信息弹层任意键关闭 → 全屏歌词拦截 (L/Esc/q 退出, 空格/n/p 可用) →
+优先级从上到下: 帮助任意键关闭 → 歌曲信息弹层任意键关闭 → 删除确认弹层 (Enter/y 确认 · Esc/n
+取消 · 其它键忽略) → 全屏歌词拦截 (L/Esc/q 退出, 空格/n/p 可用) →
 searchMode (仅 Esc 退出) → plDialog 弹层 (仅 Esc 关闭) →
 j/k/up/down 统一导航 (视图感知) → g/G 列表首尾 → settings 路由块 (Esc/←/→/Enter) →
-pl 路由块 → 普通 switch (空格/n/p/seek/m/s/z/i/f/F/l/L/d/h/1..4/q/±/M)。
+pl 路由块 → 普通 switch (空格/n/p/seek/m/s/z/i/f/F/R/D/l/L/d/h/1..4/q/±/M)。
 **视图路由块里 return 的键不会落入全局 switch**; 反之全局键 (如 +/- 音量, z 睡眠)
-在 settings 路由块故意不拦截, 让设置视图也能用。
+在 settings 路由块故意不拦截, 让设置视图也能用。`R`/`D` 也放在全局 switch —
+settings/pl 路由块都不拦截它们, 所以每个视图都能按 (歌单列表级/设置视图会提示"没有可操作的歌曲")。
+**注意 `r`/`d` 是小写键、只在歌单视图有含义; `R`/`D` 是大写键、只做歌曲文件编辑, 两者互不干扰。**
 
 ## 快捷键现状
 
@@ -88,7 +115,7 @@ pl 路由块 → 普通 switch (空格/n/p/seek/m/s/z/i/f/F/l/L/d/h/1..4/q/±/M)
   (歌词延迟 -5~5s, 负=提前/正=滞后)。
 - 音量 `+`/`-` 即时 `saveConfig({ volume })`; 倍速调整 `saveConfig({ speed })`; 歌词延迟 `saveConfig({ lyric_delay })`。
 - 新增键: `z` 睡眠定时循环 (15/30/60/90 分钟, 0=关, 全视图可用) · `i` 歌曲信息弹层 ·
-  `g`/`G` 列表首/尾 (vim 风格)。
+  `g`/`G` 列表首/尾 (vim 风格) · `R` 重命名歌曲文件 · `D` 删除歌曲文件 (确认弹层)。
 
 ## Nerd Font 图标
 

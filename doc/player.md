@@ -60,6 +60,27 @@
   延迟 > 0 → 歌词滞后于声音 (字幕偏快时往后调正数); 延迟 < 0 → 歌词提前; 0 = 同步。
 - 持久化 `saveConfig({ lyric_delay })`; 纯 UI 层逻辑, 不触碰 mpv。
 
+## 歌曲文件操作 (renameTrack / deleteTrack)
+
+UI 的 `R`/`D` 直接改**磁盘文件**, 所以路径键的数据结构必须一次性全部跟着搬。绝对路径
+到处都是 (playlist / queue 只是下标 / favorites / playlists.toml / plays.toml /
+durations.toml / state.toml / scan-cache.toml / 内存 playCounts+durations), 漏一处就是脏数据。
+
+- `renameTrack(oldPath, newBase)`: 校验 (空名 / 含 `/` `\` NUL / `.` `..` / 同名 / 目标已存在)
+  → `renameSync` 本体 → 同名 `.lrc` 一起改名 (保留 `.lrc`/`.LRC` 大小写) → 同步
+  playlist / currentPath (+`saveCacheState({last_path})`) / favorites (+saveConfig) /
+  playlists (+savePlaylists) / 内存 playCounts+durations (键搬迁, 计数相加) /
+  `renameTrackData` (plays.toml + durations.toml) / `renameInScanCache`。
+  **扩展名沿用原文件**; 同目录就地改名, 不重排 playlist 顺序 (`d` 重扫才重排)。
+- `deleteTrack(path)`: 删本体 → 删同名 `.lrc` → 若 `currentPath === path` 先 `stopPlayback()`
+  → `removePlaylistIndex(k)` → `totalPlayCount -= 该曲计数` → 清 favorites / playlists /
+  内存计数+时长 / `dropTrackData` / `dropFromScanCache`。
+- `removePlaylistIndex(k)`: `queue` 过滤掉 k 并把大于 k 的下标统一 -1 (随机/收藏顺序保持),
+  `idx` 跟随修正。**不要在别处手写这段重编号**。
+- `stopPlayback()`: 删正在播的曲时用。复用 `suppressEndFile` 抑制窗口 (stop 也会发
+  end-file) → 否则会被当成自然播完而自动跳下一首; mpv `command("stop")` + 清空播放状态。
+- `findLrc` 已改为同步 (`src/lrc.ts`), 因为改名/删除要在同一同步流程里处理歌词文件。
+
 ## 时长缓存 (durations)
 
 - `durations: Map<path, 秒>` — 列表右侧显示每首时长用; 未知显示 `--`。

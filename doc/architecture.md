@@ -2,7 +2,7 @@
 
 > Bun + TypeScript + `@opentui/core` 终端播放器, 引擎是外部 `mpv` (unix socket JSON IPC)。
 > 从 Python curses 版 `lxm.py` 移植, 配置兼容。
-> 版本: r-0.5 — 唯一来源 `src/version.ts` (index.ts / ui.ts 引用; package.json 手动同步)
+> 版本: r-0.6 — 唯一来源 `src/version.ts` (index.ts / ui.ts 引用; package.json 手动同步)
 
 ## 目录结构
 

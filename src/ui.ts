@@ -5,28 +5,32 @@
  * 歌单 tab 内二级: 歌单列表 → 某歌单详情 (Enter 进入, Esc 返回)
  * 歌单详情内 a 进入"加歌选歌"模式 (Enter 加入, Esc 返回)
  * 设置 tab: 主题 / 音量 / 倍速 / 音乐目录 / 缓存
+ * 歌曲编辑: R 重命名歌曲文件 (弹层输入) · D 删除歌曲文件 (确认弹层) — 动的是磁盘文件
  *
- * ── 区块导航 (改码用行号精准读取, 别整读 1750 行) ──
- *  63 类声明 + 状态字段
- * 126 constructor       142 buildTree            (组件树构建, ~350 行)
- * 490 attachGlobalKeys  495 attachInputEvents   505 attachDialogEvents
- * 514 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
- * 550 handleKey         (按键路由, 见 doc/ui.md)
- * 810 setView           853 updateTabBar        867 flash
- * 873 listCount         889 moveSel             897 playSel
- * 921 playIndex         925 afterTrackChange    930 seek
- * 935 seekFromMouse     947 favCurrent
- * 963 settingEnter      977 settingAdjust       1001 applyMusicDir
- * 1022 enterSearch      1033 doSearch           1064 exitSearch
- * 1097 refreshDir       1109 applyTheme         1167 cycleTheme  1175 quit
- * 1184 openPlDetail     1192 closePlDetail      1200 openPlDialog
- * 1221 closePlDialog    1232 commitPlDialog     1274 plEnter
- * 1309 plDelete         1332 enterPlPicker      1341 plPickerAdd
- * 1355 plPickerExit     1362 setFullLyrics      1371 rebuildPlaylistRows
- * 1402 onRowClick       1436 rowAt              1489 updatePlaylist
- * 1517 playlistTitle    1537 tick               (渲染管线, 见 doc/ui.md)
- * 1621 updateNowPlaying 1649 updateLyrics       1693 buildLyricRows
- * 1709 updateFullLyrics
+ * ── 区块导航 (改码用行号精准读取, 别整读 2300 行) ──
+ * 140 类声明 + 状态字段
+ * 223 constructor       243 buildTree            (组件树构建, ~500 行)
+ * 741 attachGlobalKeys  746 attachInputEvents   756 attachDialogEvents
+ * 765 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
+ * 803 handleKey         (按键路由, 见 doc/ui.md)
+ * 1109 setView          1152 updateTabBar       1166 flash
+ * 1179 listCount        1195 moveSel            1203 playSel
+ * 1227 playIndex        1231 afterTrackChange   1236 seek
+ * 1241 seekFromMouse    1253 favCurrent
+ * 1269 selectedSongPath 1287 renameSelectedSong 1298 deleteSelectedSong
+ * 1318 askConfirm       1325 closeConfirm
+ * 1334 settingEnter     1353 settingAdjust      1386 applyMusicDir
+ * 1407 enterSearch      1418 doSearch           1449 exitSearch
+ * 1482 refreshDir       1494 applyTheme         1559 cycleTheme  1567 quit
+ * 1576 openPlDetail     1584 closePlDetail      1592 openPlDialog
+ * 1618 closePlDialog    1630 commitPlDialog     1690 plEnter
+ * 1725 plDelete         1748 enterPlPicker      1757 plPickerAdd
+ * 1771 plPickerExit     1778 setFullLyrics      1785 openInfo
+ * 1809 closeInfo        1817 rebuildPlaylistRows
+ * 1862 onRowClick       1897 rowAt              1968 updatePlaylist
+ * 2011 playlistTitle    2031 tick               (渲染管线, 见 doc/ui.md)
+ * 2144 updateNowPlaying 2187 updateLyrics       2238 buildLyricRows
+ * 2254 updateFullLyrics
  */
 import {
   BoxRenderable,
@@ -159,9 +163,16 @@ export class PlayerUI {
   private savedFavSel = 0 // 进设置前收藏游标, 返回时恢复
   private dirInput = "" // 设置: 改目录弹层输入缓冲
 
-  // 弹层输入态: "new" 新建 / "rename" 重命名 / "set-dir" 改音乐目录 / null 不弹
-  plDialogMode: "new" | "rename" | "set-dir" | null = null
+  // 弹层输入态: "new" 新建歌单 / "rename" 重命名歌单 / "rename-song" 重命名歌曲文件
+  //            / "set-dir" 改音乐目录 / null 不弹
+  plDialogMode: "new" | "rename" | "rename-song" | "set-dir" | null = null
   plDialogValue = ""
+  /** 重命名歌曲的目标文件 (开弹层时锁定, 免受 sel 变动影响) */
+  pendingSongPath: string | null = null
+
+  // 破坏性操作确认弹层 (删除歌曲): 非 null 时独占按键, Enter/y 确认 · Esc/n 取消
+  confirmAction: (() => void) | null = null
+  private confirmMessage = ""
 
   // ---------- 节点引用 ----------
   private eqText!: TextRenderable
@@ -196,6 +207,9 @@ export class PlayerUI {
   private plDialogTitle!: TextRenderable
   private plDialogInput!: InputRenderable
   private plDialogHint!: TextRenderable
+  // 确认弹层 (删除歌曲等破坏性操作)
+  private confirmOverlay!: BoxRenderable
+  private confirmText!: TextRenderable
   // tab 栏 (播放列表 / 收藏 / 歌单 / 设置)
   private tabBar!: BoxRenderable
   private tabBtns: BoxRenderable[] = []
@@ -480,6 +494,10 @@ export class PlayerUI {
         ["空格 / Enter", "播放 · 暂停 · 播放选中"],
         ["n / p  ·  ← / →  ·  [ / ]", "切歌 · 快退快进 5 / 10 秒"],
       ]},
+      { icon: "\uF044", title: "编辑歌曲", items: [
+        ["R", "重命名歌曲文件 (同名 .lrc 一起改)"],
+        ["D", "删除歌曲文件 (Enter 确认, 不可恢复)"],
+      ]},
       { icon: "\uF03A", title: "列表导航", items: [
         ["↑↓ / jk  ·  g / G", "选择曲目 · 跳到首 / 尾"],
         ["1 / 2 / 3 / 4", "列表 / 收藏 / 歌单 / 设置"],
@@ -672,6 +690,44 @@ export class PlayerUI {
     this.plDialogOverlay.add(this.plDialogHint)
     root.add(this.plDialogOverlay)
 
+    // ── 确认弹层 (破坏性操作: 删除歌曲) ──
+    this.confirmOverlay = new BoxRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: this.theme.crust,
+      visible: false,
+      zIndex: 250,
+    })
+    const confirmCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      borderStyle: "double",
+      borderColor: this.theme.red,
+      title: " \uF1F8 确认 ",
+      titleColor: this.theme.red,
+      paddingLeft: 3,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      width: 66,
+    })
+    this.confirmText = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false })
+    confirmCard.add(this.confirmText)
+    confirmCard.add(
+      new TextRenderable(r, {
+        content: t`${bold(fg(this.theme.red)(" Enter / y 确认 "))}${fg(this.theme.overlay)("  ·  ")}${fg(this.theme.subtext)("Esc / n 取消 ")}`,
+        selectable: false,
+        paddingTop: 1,
+      }),
+    )
+    this.confirmOverlay.add(confirmCard)
+    root.add(this.confirmOverlay)
+
     this.attachDialogEvents()
 
     r.root.add(root)
@@ -759,6 +815,19 @@ export class PlayerUI {
     // 歌曲信息弹层: 任意键关闭
     if (this.showInfo) {
       this.closeInfo()
+      key.preventDefault()
+      return
+    }
+    // 确认弹层 (删除歌曲): Enter/y 确认, Esc/n 取消, 其它键忽略
+    if (this.confirmAction) {
+      if (name === "return" || name === "enter" || seq === "y" || seq === "Y") {
+        const act = this.confirmAction
+        this.closeConfirm()
+        act()
+      } else if (name === "escape" || seq === "n" || seq === "N") {
+        this.closeConfirm()
+        this.flash("已取消喵~")
+      }
       key.preventDefault()
       return
     }
@@ -963,6 +1032,15 @@ export class PlayerUI {
         break
       case seq === "f":
         this.favCurrent()
+        break
+      case seq === "R":
+        this.renameSelectedSong()
+        // 必须 preventDefault: 弹层输入框在按键处理中被 focus, 不拦的话触发键 R 会漏进输入框
+        key.preventDefault()
+        break
+      case seq === "D":
+        this.deleteSelectedSong()
+        key.preventDefault()
         break
       case seq === "F":
         this.setView("fav")
@@ -1188,6 +1266,71 @@ export class PlayerUI {
     this.updatePlaylist()
   }
 
+  // ---------- 编辑歌曲 (重命名 R / 删除 D, 动的是磁盘文件) ----------
+
+  /** 当前视图选中行对应的歌曲路径; 设置/歌单列表级、或该曲不在音乐库中返回 null */
+  private selectedSongPath(): string | null {
+    const p = this.p
+    if (this.view === "settings") return null
+    if (this.view === "pl") {
+      if (this.plPickerMode) return p.playlist[this.sel] ?? null
+      if (this.plLevel === "detail" && this.plCurrent) {
+        const path = p.playlistPaths(this.plCurrent)[this.sel]
+        return path && p.playlist.includes(path) ? path : null
+      }
+      return null
+    }
+    if (!p.playlist.length) return null
+    const useQueue = this.searchActive || this.view === "fav" || p.favMode
+    const idx = useQueue ? p.selToPlaylistIdx(this.sel, true) : this.sel
+    return p.playlist[idx] ?? null
+  }
+
+  /** R: 重命名选中歌曲 (弹层输入新歌名, 扩展名沿用原文件) */
+  private renameSelectedSong() {
+    const path = this.selectedSongPath()
+    if (!path) {
+      this.flash("这里没有可重命名的歌曲喵~")
+      return
+    }
+    this.pendingSongPath = path
+    this.openPlDialog("rename-song", titleOf(path))
+  }
+
+  /** D: 删除选中歌曲 (确认后删磁盘文件 + 同名 .lrc) */
+  private deleteSelectedSong() {
+    const path = this.selectedSongPath()
+    if (!path) {
+      this.flash("这里没有可删除的歌曲喵~")
+      return
+    }
+    const label = titleOf(path)
+    this.askConfirm(`\uF1F8 删除「${label}」? 会删除磁盘文件 (含同名歌词)`, () => {
+      const r = this.p.deleteTrack(path)
+      if (!r.ok) {
+        this.flash(`删除失败喵~ (${r.error})`)
+        return
+      }
+      this.sel = Math.max(0, Math.min(Math.max(0, this.listCount() - 1), this.sel))
+      this.flash(`\uF1F8 已删除: ${label}`, 2)
+      this.afterTrackChange()
+    })
+  }
+
+  /** 弹确认弹层 (破坏性操作); action 在确认后执行, Esc/n 取消 */
+  private askConfirm(message: string, action: () => void) {
+    this.confirmMessage = message
+    this.confirmAction = action
+    this.confirmText.content = t`${fg(this.theme.text)(clipWidth(message, 58))}`
+    this.confirmOverlay.visible = true
+  }
+
+  private closeConfirm() {
+    this.confirmAction = null
+    this.confirmMessage = ""
+    this.confirmOverlay.visible = false
+  }
+
   // ---------- 设置视图 ----------
 
   /** 设置项 Enter: 0 主题 / 3 歌词延迟 / 4 睡眠 / 5 改目录 / 6 缓存清空 / 7 版本只读 */
@@ -1370,6 +1513,9 @@ export class PlayerUI {
     const plPicker = this.plPickerMode
     const savedSel = this.savedListSel
     const sel = this.sel
+    const confirmMsg = this.confirmMessage
+    const confirmAct = this.confirmAction
+    const pendingSong = this.pendingSongPath
 
     for (const ch of this.renderer.root.getChildren()) {
       ch.destroyRecursively()
@@ -1404,6 +1550,8 @@ export class PlayerUI {
     this.plPickerMode = plPicker
     this.savedListSel = savedSel
     this.sel = sel
+    this.pendingSongPath = pendingSong
+    if (confirmAct) this.askConfirm(confirmMsg, confirmAct)
     this.lastPlTitle = "" // 标题节点已重建, 缓存作废, 让 tick 重写
     this.updateTabBar()
     this.updatePlaylist()
@@ -1443,24 +1591,29 @@ export class PlayerUI {
     this.updatePlaylist()
   }
 
-  /** 弹出输入弹层: 新建/重命名歌单 / 修改音乐目录 */
-  openPlDialog(mode: "new" | "rename" | "set-dir", preset = "") {
+  /** 弹出输入弹层: 新建/重命名歌单 · 重命名歌曲 · 修改音乐目录 */
+  openPlDialog(mode: "new" | "rename" | "rename-song" | "set-dir", preset = "") {
     this.plDialogMode = mode
     this.plDialogValue = preset
     this.plDialogInput.value = preset
-    this.plDialogInput.width = mode === "set-dir" ? 70 : 40
+    this.plDialogInput.width = mode === "set-dir" ? 70 : mode === "rename-song" ? 50 : 40
     this.plDialogTitle.content =
       mode === "new"
         ? t`${bold(fg(this.theme.sky)(" \uF067 新建歌单 "))}`
         : mode === "rename"
           ? t`${bold(fg(this.theme.sky)(" \uF044 重命名歌单 "))}`
-          : t`${bold(fg(this.theme.sky)(" \uF07B 修改音乐目录 "))}`
+          : mode === "rename-song"
+            ? t`${bold(fg(this.theme.sky)(" \uF044 重命名歌曲 "))}`
+            : t`${bold(fg(this.theme.sky)(" \uF07B 修改音乐目录 "))}`
+    const songExt = this.pendingSongPath ? extOf(this.pendingSongPath) : ""
     this.plDialogHint.content =
       mode === "new"
         ? "输入名称 · Enter 确认 · Esc 取消"
         : mode === "rename"
           ? `原名: ${preset}  ·  Enter 确认 · Esc 取消`
-          : `当前: ${preset}  ·  输入完整路径 · Enter 确认重扫 · Esc 取消`
+          : mode === "rename-song"
+            ? `原名: ${preset}${songExt}  ·  只输入歌名, 后缀 ${songExt} 保留 · Enter 确认 · Esc 取消`
+            : `当前: ${preset}  ·  输入完整路径 · Enter 确认重扫 · Esc 取消`
     this.plDialogOverlay.visible = true
     this.plDialogInput.focus()
   }
@@ -1469,6 +1622,7 @@ export class PlayerUI {
     const wasDir = this.plDialogMode === "set-dir"
     this.plDialogMode = null
     this.plDialogValue = ""
+    this.pendingSongPath = null
     this.plDialogInput.value = ""
     this.plDialogInput.width = 40
     this.plDialogOverlay.visible = false
@@ -1478,9 +1632,27 @@ export class PlayerUI {
 
   commitPlDialog(value: string) {
     const v = value.trim()
-    if (this.plDialogMode === "set-dir") {
+    const mode = this.plDialogMode
+    if (mode === "set-dir") {
       this.closePlDialog()
       if (v) this.applyMusicDir(v)
+      return
+    }
+    if (mode === "rename-song") {
+      const path = this.pendingSongPath
+      this.closePlDialog()
+      if (!path) return
+      if (!v) {
+        this.flash("歌名不能为空喵~")
+        return
+      }
+      const r = this.p.renameTrack(path, v)
+      if (!r.ok) {
+        this.flash(`重命名失败喵~ (${r.error})`)
+        return
+      }
+      this.flash(`\uF044 已重命名为: ${titleOf(r.newPath)}`, 2)
+      this.afterTrackChange()
       return
     }
     if (!v) {
@@ -1488,7 +1660,7 @@ export class PlayerUI {
       this.closePlDialog()
       return
     }
-    if (this.plDialogMode === "new") {
+    if (mode === "new") {
       const idx = this.p.createPlaylist(v)
       if (idx < 0) {
         this.flash(`已存在同名歌单喵~: ${v}`)
@@ -1497,7 +1669,7 @@ export class PlayerUI {
       }
       this.flash(`\uF067 已创建歌单: ${v}`)
       this.sel = idx
-    } else if (this.plDialogMode === "rename") {
+    } else if (mode === "rename") {
       const target = this.plCurrent ?? this.p.playlists[this.sel]?.name ?? ""
       if (!target) {
         this.flash("重命名失败喵~ (找不到歌单)")
@@ -1946,7 +2118,7 @@ export class PlayerUI {
         this.statusLeft.fg = this.theme.pink
       } else {
         this.statusLeft.content = clipWidth(
-          "空格 播放/暂停 · n/p 切歌 · f 收藏 · 1/2/3/4 列表/收藏/歌单/设置 · / 搜索 · M 静音 · +/- 音量 · h 帮助 · q 退出",
+          "空格 播放 · n/p 切歌 · f 收藏 · R 改名 · D 删除 · 1/2/3/4 视图 · / 搜索 · M 静音 · h 帮助 · q 退出",
           120,
         )
         this.statusLeft.fg = this.theme.subtext
