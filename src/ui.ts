@@ -7,33 +7,37 @@
  * 设置 tab: 主题 / 音量 / 倍速 / 音乐目录 / 缓存
  * 歌曲编辑: R 重命名歌曲文件 (弹层输入) · D 删除歌曲文件 (确认弹层) — 动的是磁盘文件
  *
- * ── 区块导航 (改码用行号精准读取, 别整读 2300 行) ──
- * 140 类声明 + 状态字段
- * 223 constructor       243 buildTree            (组件树构建, ~500 行)
- * 741 attachGlobalKeys  746 attachInputEvents   756 attachDialogEvents
- * 765 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
- * 803 handleKey         (按键路由, 见 doc/ui.md)
- * 1109 setView          1152 updateTabBar       1166 flash
- * 1179 listCount        1195 moveSel            1203 playSel
- * 1227 playIndex        1231 afterTrackChange   1236 seek
- * 1241 seekFromMouse    1253 favCurrent
- * 1269 selectedSongPath 1287 renameSelectedSong 1298 deleteSelectedSong
- * 1318 askConfirm       1325 closeConfirm
- * 1334 settingEnter     1353 settingAdjust      1386 applyMusicDir
- * 1407 enterSearch      1418 doSearch           1449 exitSearch
- * 1482 refreshDir       1494 applyTheme         1559 cycleTheme  1567 quit
- * 1576 openPlDetail     1584 closePlDetail      1592 openPlDialog
- * 1618 closePlDialog    1630 commitPlDialog     1690 plEnter
- * 1725 plDelete         1748 enterPlPicker      1757 plPickerAdd
- * 1771 plPickerExit     1778 setFullLyrics      1785 openInfo
- * 1809 closeInfo        1817 rebuildPlaylistRows
- * 1862 onRowClick       1897 rowAt              1968 updatePlaylist
- * 2011 playlistTitle    2031 tick               (渲染管线, 见 doc/ui.md)
- * 2144 updateNowPlaying 2187 updateLyrics       2238 buildLyricRows
- * 2254 updateFullLyrics
+ * ── 区块导航 (改码用行号精准读取, 别整读 2400 行) ──
+ * 177 类声明 + 状态字段
+ * 269 constructor       289 buildTree            (组件树构建, ~500 行)
+ * 789 attachGlobalKeys  794 attachInputEvents   804 attachDialogEvents
+ * 813 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
+ * 851 handleKey         (按键路由, 见 doc/ui.md)
+ * 1160 setView          1203 updateTabBar       1211 applyTabBar       1222 stepTabAnim
+ * 1234 flash            1247 listCount          1263 moveSel           1271 playSel
+ * 1295 playIndex        1299 afterTrackChange   1304 seek
+ * 1309 seekFromMouse    1321 favCurrent
+ * 1337 selectedSongPath 1355 renameSelectedSong 1366 deleteSelectedSong
+ * 1386 askConfirm       1393 closeConfirm
+ * 1402 settingEnter     1421 settingAdjust      1454 applyMusicDir
+ * 1475 enterSearch      1486 doSearch           1517 exitSearch
+ * 1550 refreshDir       1562 applyTheme         1627 cycleTheme  1635 quit
+ * 1644 openPlDetail     1652 closePlDetail      1660 openPlDialog
+ * 1686 closePlDialog    1698 commitPlDialog     1758 plEnter
+ * 1793 plDelete         1816 enterPlPicker      1825 plPickerAdd
+ * 1839 plPickerExit     1846 setFullLyrics      1853 openInfo
+ * 1877 closeInfo        1885 rebuildPlaylistRows
+ * 1930 onRowClick       1965 rowAt              2036 updatePlaylist
+ * 2081 playlistTitle    2101 tick               (渲染管线, 见 doc/ui.md)
+ * 2207 startAnimLoop    2212 stopAnimLoop       2219 syncAnimRate  2228 animTick
+ * 2237 updateEq         2253 updateAccent       2272 updateNowPlaying
+ * 2339 updateLyrics     2390 buildLyricRows     2406 updateFullLyrics
+ * 动效循环 (30fps, 独立于 100ms tick) 只重画装饰: 等化器/彩虹条/进度条/分隔线/卡片边框/tab 过渡
+ * 渐变工具在文件头 mixHex/paletteAt/pulse; 入口 index.ts 调 startAnimLoop/stopAnimLoop
  */
 import {
   BoxRenderable,
+  StyledText,
   TextRenderable,
   ScrollBoxRenderable,
   InputRenderable,
@@ -45,6 +49,7 @@ import {
   type CliRenderer,
   type KeyEvent,
   type MouseEvent,
+  type TextChunk,
 } from "@opentui/core"
 import { existsSync } from "fs"
 import { resolve } from "path"
@@ -67,6 +72,41 @@ const TAB_KEYS: Array<"list" | "fav" | "pl" | "settings"> = ["list", "fav", "pl"
 const TAB_LABELS = [" \uF03A 播放列表 ", " \uF004 收藏 ", " \uF1C5 歌单 ", " \uF013 设置 "]
 
 const EQ_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆"]
+
+/** 动效帧间隔: 播放/全屏歌词时 30fps, 待机时降频省电 (渐变本身极慢, 5fps 也平滑) */
+const ANIM_FAST_MS = 33
+const ANIM_IDLE_MS = 180
+
+/** 彩虹条色板: 主题色的固定顺序 (每帧按主题取值 → 换主题不变调色逻辑) */
+const RAINBOW_KEYS = ["sky", "lavender", "pink", "peach", "yellow", "green"] as const
+
+// ── 混色工具 (动效每帧插值出 hex, 直接喂给 fg()/backgroundColor) ──
+
+/** 线性混色 (hex 三/六位): t=0 → a, t=1 → b; 用于渐变/淡出/呼吸插值 */
+function mixHex(a: string, b: string, t: number): string {
+  if (t <= 0) return a
+  if (t >= 1) return b
+  let hex = "#"
+  for (let i = 0; i < 3; i++) {
+    const ca = Number.parseInt(a.length === 4 ? a[1 + i] + a[1 + i] : a.slice(1 + i * 2, 3 + i * 2), 16) || 0
+    const cb = Number.parseInt(b.length === 4 ? b[1 + i] + b[1 + i] : b.slice(1 + i * 2, 3 + i * 2), 16) || 0
+    hex += Math.round(ca + (cb - ca) * t).toString(16).padStart(2, "0")
+  }
+  return hex
+}
+
+/** 循环色板采样: u 自动取模, 相邻色之间线性插值 → 连续无级渐变 */
+function paletteAt(pal: readonly string[], u: number): string {
+  const n = pal.length
+  const x = (((u % 1) + 1) % 1) * n
+  const i = Math.floor(x)
+  return mixHex(pal[i % n], pal[(i + 1) % n], x - i)
+}
+
+/** 0..1 的圆滑脉冲 (周期 periodMs, 相位 0 时取 0) */
+function pulse(now: number, periodMs: number): number {
+  return 0.5 - 0.5 * Math.cos((now / periodMs) * Math.PI * 2)
+}
 
 /** 按显示宽度截断 (CJK 宽字符计 2 列) */
 function clipWidth(text: string, maxw: number): string {
@@ -176,6 +216,7 @@ export class PlayerUI {
 
   // ---------- 节点引用 ----------
   private eqText!: TextRenderable
+  private accentText!: TextRenderable
   private headModeText!: TextRenderable
   private headRightText!: TextRenderable
   private nowStatusText!: TextRenderable
@@ -219,6 +260,14 @@ export class PlayerUI {
   private playsTotal = 0
   private theme: Theme = THEMES.latte
   private themeName: ThemeName = "latte"
+
+  // ---------- 装饰动效 (独立于 100ms tick 的动画帧) ----------
+  /** 动效循环定时器; undefined = 未启动 (测试/无动画场景不会创建) */
+  private animTimer: Timer | undefined = undefined
+  private animMs = 0 // 当前帧间隔 (播放/待机自适应)
+  /** tab 颜色过渡: level 为当前插值值, target 为目标值 (0=闲置, 1=激活) */
+  private tabLevel: number[] = []
+  private tabTarget: number[] = []
 
   constructor(
     private renderer: CliRenderer,
@@ -277,15 +326,15 @@ export class PlayerUI {
     header.add(this.headRightText)
     root.add(header)
 
-    // ── 顶部渐变色彩线 (品牌点缀) ──
+    // ── 顶部渐变彩虹条 (品牌点缀: 居中缩窄的细条, 内容由 updateAccent 每帧画) ──
     const accent = new BoxRenderable(r, {
       height: 1,
       flexDirection: "row",
+      justifyContent: "center",
       backgroundColor: this.theme.base,
     })
-    for (const c of [this.theme.sky, this.theme.lavender, this.theme.pink, this.theme.peach, this.theme.yellow, this.theme.green]) {
-      accent.add(new BoxRenderable(r, { flexGrow: 1, backgroundColor: c }))
-    }
+    this.accentText = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
+    accent.add(this.accentText)
     root.add(accent)
 
     // ── 正在播放卡片 (紧凑: 减内边距, 底部加渐变分隔线) ──
@@ -326,9 +375,11 @@ export class PlayerUI {
     this.timeText = new TextRenderable(r, { content: "00:00 / 00:00  0%", fg: this.theme.subtext, selectable: false })
     this.timeBox.add(this.timeText)
     this.nowPlayBox.add(this.timeBox)
-    // 渐变分隔线 (卡片底部点缀; 内容在 tick 里按进度条宽度刷新)
-    this.nowDivider = new TextRenderable(r, { content: "", selectable: false })
-    this.nowPlayBox.add(this.nowDivider)
+    // 渐变分隔线 (卡片底部点缀: 居中缩窄, 内容由 updateNowPlaying 每帧画)
+    const nowDivRow = new BoxRenderable(r, { flexDirection: "row", justifyContent: "center", height: 1 })
+    this.nowDivider = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
+    nowDivRow.add(this.nowDivider)
+    this.nowPlayBox.add(nowDivRow)
     root.add(this.nowPlayBox)
 
     // ── 歌词区 (无歌词/关闭时 tick 里 visible=false 自动收起, 让列表更大) ──
@@ -1151,16 +1202,33 @@ export class PlayerUI {
     this.updatePlaylist()
   }
 
-  /** 刷新 tab 栏高亮 (仅 view 变化时调用) */
+  /** 刷新 tab 栏: 记录目标态并重绘 (动效循环未启动时直接到位) */
   private updateTabBar() {
     const curIdx = TAB_KEYS.indexOf(this.view)
+    this.tabTarget = TAB_LABELS.map((_, i) => (i === curIdx ? 1 : 0))
+    if (!this.animTimer || this.tabLevel.length !== TAB_LABELS.length) this.tabLevel = this.tabTarget.slice()
+    this.applyTabBar()
+  }
+
+  /** 把 tab 过渡值画到节点 (颜色插值 → 切换 tab 时底色/文字平滑淡入淡出) */
+  private applyTabBar() {
     for (let i = 0; i < this.tabBtns.length; i++) {
-      const active = i === curIdx
-      this.tabBtns[i].backgroundColor = active ? this.theme.surface2 : this.theme.surface0
-      this.tabTexts[i].content = active
-        ? t`${bold(fg(this.theme.sky)(TAB_LABELS[i]))}`
-        : t`${fg(this.theme.subtext)(TAB_LABELS[i])}`
+      const a = this.tabLevel[i] ?? 0
+      this.tabBtns[i].backgroundColor = mixHex(this.theme.surface0, this.theme.surface2, a)
+      const label = TAB_LABELS[i]
+      this.tabTexts[i].content =
+        a > 0.5 ? t`${bold(fg(this.theme.sky)(label))}` : t`${fg(mixHex(this.theme.subtext, this.theme.sky, a))(label)}`
     }
+  }
+
+  /** 每帧推进 tab 颜色过渡 (0.22 缓动 ≈ 6 帧到位) */
+  private stepTabAnim() {
+    for (let i = 0; i < this.tabLevel.length; i++) {
+      const target = this.tabTarget[i] ?? 0
+      const d = target - this.tabLevel[i]
+      this.tabLevel[i] = Math.abs(d) < 0.02 ? target : this.tabLevel[i] + d * 0.22
+    }
+    this.applyTabBar()
   }
 
   // =========================================================
@@ -1994,8 +2062,10 @@ export class PlayerUI {
         row.meta.content = t`${fg(this.theme.text)(meta)}`
       } else if (playing) {
         box.backgroundColor = this.theme.base
-        row.num.content = t`${fg(this.theme.green)(markStr)}${fg(this.theme.overlay)(numCol)}`
-        row.text.content = t`${bold(fg(this.theme.green)(shown))}`
+        // 播放行: 绿色标识随播放呼吸 (10fps tick 驱动, 周期 2.6s 足够平滑)
+        const markCol = mixHex(this.theme.green, this.theme.sky, 0.15 + 0.7 * pulse(Date.now(), 2600))
+        row.num.content = t`${fg(markCol)(markStr)}${fg(this.theme.overlay)(numCol)}`
+        row.text.content = t`${bold(fg(markCol)(shown))}`
         row.meta.content = t`${fg(this.theme.green)(meta)}`
       } else {
         box.backgroundColor = this.theme.base
@@ -2053,29 +2123,18 @@ export class PlayerUI {
     const plW = Math.max(0, Math.floor(this.scrollbox.width || 0))
     if (plW !== this.lastPlDivW) {
       this.lastPlDivW = plW
-      this.plDivider.content = plW > 2 ? t`${fg(this.theme.surface1)("─".repeat(plW - 1))}` : ""
+      // 右端渐隐的细线 (纯装饰, 宽度变化时才重画)
+      const parts: TextChunk[] = []
+      for (let i = 0; i < plW - 1; i++) {
+        parts.push(fg(mixHex(this.theme.surface2, this.theme.base, Math.pow(i / Math.max(1, plW - 2), 0.8)))("─"))
+      }
+      this.plDivider.content = plW > 2 ? new StyledText(parts) : ""
     }
 
-    // 等化器动画
-    if (p.playing && !p.paused) {
-      const tc = this.tickCount
-      const bars = EQ_CHARS.map((c, i) => {
-        const v = Math.abs(Math.sin(tc * 0.35 + i * 1.7) * Math.cos(tc * 0.18 + i * 0.9))
-        const h = Math.min(EQ_CHARS.length - 1, Math.floor(v * EQ_CHARS.length))
-        return EQ_CHARS[h]
-      })
-      const parts = [
-        fg(this.theme.sky)(bars[0]),
-        fg(this.theme.lavender)(bars[1]),
-        fg(this.theme.pink)(bars[2]),
-        fg(this.theme.peach)(bars[3]),
-        fg(this.theme.yellow)(bars[4]),
-        fg(this.theme.sky)(bars[5]),
-      ]
-      this.eqText.content = t`${parts[0]}${parts[1]}${parts[2]}${parts[3]}${parts[4]}${parts[5]}`
-    } else {
-      this.eqText.content = t`${fg(this.theme.overlay)("▁ ▁ ▁ ▁ ▁ ▁")}`
-    }
+    // 装饰动效 (等化器/彩虹条): 动效循环运行时由 animTick 以 30fps 重画, 这里兜底刷新
+    this.updateEq()
+    this.updateAccent()
+    if (this.animTimer) this.syncAnimRate()
 
     // 头部信息: 视图 + 模式
     const mode =
@@ -2143,7 +2202,76 @@ export class PlayerUI {
     if (this.fullLyrics) this.updateFullLyrics()
   }
 
-  /** 更新"正在播放"卡片与进度条 */
+  // =========================================================
+  //  装饰动效循环 (独立于 100ms tick; 入口调用 startAnimLoop)
+  // =========================================================
+
+  /** 启动装饰动效循环; 由 index.ts 在 renderer 就绪后调用 (测试不调用 → 无定时器) */
+  startAnimLoop() {
+    this.syncAnimRate(true)
+  }
+
+  /** 停止动效循环 (退出清理; 必须在 renderer.destroy 前调用) */
+  stopAnimLoop() {
+    clearInterval(this.animTimer)
+    this.animTimer = undefined
+    this.animMs = 0
+  }
+
+  /** 动效帧率自适应: 播放/全屏歌词 30fps, 待机降频省电 (渐变本身极慢, 看不出差别) */
+  private syncAnimRate(force = false) {
+    const want = (this.p.playing && !this.p.paused) || this.fullLyrics ? ANIM_FAST_MS : ANIM_IDLE_MS
+    if (!force && want === this.animMs) return
+    this.animMs = want
+    clearInterval(this.animTimer)
+    this.animTimer = setInterval(() => this.animTick(), want)
+  }
+
+  /** 一帧动效: 只重画纯装饰, 不碰列表/歌词等 tick 职责 (避免两份真相源互踩) */
+  private animTick() {
+    this.updateEq()
+    this.updateAccent()
+    this.updateNowPlaying()
+    this.stepTabAnim()
+    if (this.fullLyrics) this.updateFullLyrics()
+  }
+
+  /** 头部伪频谱等化器 (播放时按秒级相位跳动, 否则静止) */
+  private updateEq() {
+    const p = this.p
+    if (!p.playing || p.paused) {
+      this.eqText.content = t`${fg(this.theme.overlay)("▁ ▁ ▁ ▁ ▁ ▁")}`
+      return
+    }
+    const now = Date.now() / 1000
+    const cols = [this.theme.sky, this.theme.lavender, this.theme.pink, this.theme.peach, this.theme.yellow, this.theme.sky]
+    const parts: TextChunk[] = EQ_CHARS.map((_, i) => {
+      const v = Math.abs(Math.sin(now * 3.5 + i * 1.7) * Math.cos(now * 1.8 + i * 0.9))
+      return fg(cols[i])(EQ_CHARS[Math.min(EQ_CHARS.length - 1, Math.floor(v * EQ_CHARS.length))])
+    })
+    this.eqText.content = new StyledText(parts)
+  }
+
+  /** 顶部彩虹条: 居中缩窄的细条, 渐变缓慢流动 + 两端淡出 (播放时轻微呼吸/增亮) */
+  private updateAccent() {
+    const termW = this.renderer.width || 80
+    const w = Math.max(8, Math.min(56, Math.floor(termW * 0.42), Math.max(8, termW - 2)))
+    const pal = RAINBOW_KEYS.map((k) => this.theme[k])
+    const now = Date.now()
+    const flow = (now / 1000) * 0.07 // 走完一轮彩虹 ≈ 14s
+    const energy = this.p.playing && !this.p.paused ? 0.78 + 0.22 * pulse(now, 2600) : 0.62
+    const parts: TextChunk[] = []
+    for (let i = 0; i < w; i++) {
+      let col = paletteAt(pal, i / Math.max(1, w - 1) + flow)
+      const edge = Math.min(i, w - 1 - i) / Math.max(1, (w - 1) * 0.17)
+      if (edge < 1) col = mixHex(this.theme.base, col, edge)
+      col = mixHex(this.theme.base, col, energy)
+      parts.push(fg(col)("▄"))
+    }
+    this.accentText.content = new StyledText(parts)
+  }
+
+  /** 更新"正在播放"卡片与进度条 (含动效: 渐变流动/光点/分隔线/边框呼吸) */
   updateNowPlaying() {
     const p = this.p
     const status = p.playing ? (p.paused ? "\uF04C 已暂停" : "\uF04B 播放中") : "\uF04D 待机"
@@ -2163,27 +2291,51 @@ export class PlayerUI {
     const dur = p.duration
     const tpos = p.timePos
     const pct = dur > 0 ? Math.max(0, Math.min(1, tpos / dur)) : 0
+    const now = Date.now()
+    const playing = p.playing && !p.paused
     // 8x 高分辨率: 用 9 段分数块 ▏▎▍▌▋▊▉█ 平滑填充
     const FRAC = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
     const units = Math.round(barw * 8 * pct)
     const full = Math.floor(units / 8)
     const rem = units % 8
-    const f1 = Math.min(full, Math.ceil(barw / 3))
-    const f2 = Math.min(Math.max(full - f1, 0), Math.ceil(barw / 3))
-    const f3 = Math.max(full - f1 - f2, 0)
-    const p1 = f1 === full ? FRAC[rem] : ""
-    const p2 = f2 > 0 && f1 + f2 === full ? FRAC[rem] : ""
-    const p3 = f3 > 0 && f1 + f2 + f3 === full ? FRAC[rem] : ""
     const tail = Math.max(barw - full - (rem ? 1 : 0), 0)
-    this.progressText.content = t`${fg(this.theme.sky)("█".repeat(f1) + p1)}${fg(this.theme.lavender)("█".repeat(f2) + p2)}${fg(this.theme.pink)("█".repeat(f3) + p3)}${fg(this.theme.surface1)("░".repeat(tail))}`
+    // 填充段: 三色渐变随时间流动 (暂停时降速并去饱和), 播放时有光点沿进度扫过
+    const PROG_PAL = [this.theme.sky, this.theme.lavender, this.theme.pink]
+    const flow = (now / 1000) * (playing ? 0.3 : 0.06)
+    const shine = playing ? (((now / 1000) * 0.42) % 1.5) - 0.25 : -1
+    const parts: TextChunk[] = []
+    for (let j = 0; j < full; j++) {
+      const u = j / Math.max(1, full)
+      let col = paletteAt(PROG_PAL, u + flow)
+      const d = Math.abs(u - shine)
+      if (d < 0.09) col = mixHex(col, this.theme.text, (1 - d / 0.09) * 0.75)
+      if (!playing) col = mixHex(col, this.theme.surface1, 0.5)
+      parts.push(fg(col)("█"))
+    }
+    if (rem > 0) {
+      const col = paletteAt(PROG_PAL, (full + 0.5) / Math.max(1, full) + flow)
+      parts.push(fg(playing ? col : mixHex(col, this.theme.surface1, 0.5))(FRAC[rem]))
+    }
+    if (tail > 0) parts.push(fg(this.theme.surface1)("░".repeat(tail)))
+    this.progressText.content = new StyledText(parts)
     const durText = dur > 0 ? fmt(dur) : "--:--"
     const pctText = dur > 0 ? String(Math.round(pct * 100)).padStart(3) : "---"
     this.timeText.content = ` ${fmt(tpos)} / ${durText}  ${pctText}% `
-    // 卡片底部渐变分隔线 (铺满卡片内宽)
-    const cardW = Math.max(8, (this.nowPlayBox.width || 80) - 7)
-    const d1 = Math.floor(cardW / 3)
-    const d2 = Math.floor((cardW - d1) / 2)
-    this.nowDivider.content = t`${fg(this.theme.sky)("╸".repeat(Math.max(1, d1)))}${fg(this.theme.lavender)("╸".repeat(Math.max(1, d2)))}${fg(this.theme.pink)("╸".repeat(Math.max(1, cardW - d1 - d2)))}`
+    // 卡片底部渐变分隔线: 居中缩窄 + 渐变流动 + 两端淡出到卡片底色
+    const cardInner = Math.max(10, (this.nowPlayBox.width || 80) - 6)
+    const dib = Math.max(6, Math.round(cardInner * 0.62))
+    const dflow = (now / 1000) * 0.12
+    const dparts: TextChunk[] = []
+    for (let i = 0; i < dib; i++) {
+      let col = paletteAt(PROG_PAL, i / Math.max(1, dib - 1) + dflow)
+      const edge = Math.min(i, dib - 1 - i) / Math.max(1, (dib - 1) * 0.28)
+      if (edge < 1) col = mixHex(this.theme.crust, col, edge)
+      dparts.push(fg(col)("╸"))
+    }
+    this.nowDivider.content = new StyledText(dparts)
+    // 卡片边框呼吸: 播放时在 surface1↔lavender 之间缓慢脉动, 暂停偏黄, 待机静止
+    const glow = p.playing ? (p.paused ? 0.22 : 0.16 + 0.48 * pulse(now, 3200)) : 0
+    this.nowPlayBox.borderColor = glow > 0 ? mixHex(this.theme.surface1, p.paused ? this.theme.yellow : this.theme.lavender, glow) : this.theme.surface1
   }
 
   /** 更新歌词区 (当前句高亮居中) */
@@ -2264,7 +2416,16 @@ export class PlayerUI {
     const barw = Math.max(10, (this.fullOverlay.width || 40) - 24)
     const filled = Math.round(barw * pct)
     const durText = dur > 0 ? fmt(dur) : "--:--"
-    this.fullProgress.content = t`${fg(this.theme.lavender)("█".repeat(filled))}${fg(this.theme.surface1)("░".repeat(barw - filled))} ${fmt(Math.max(0, tpos))} / ${durText}`
+    // 三色渐变随时间流动 (与卡片进度条同一套观感)
+    const pal = [this.theme.sky, this.theme.lavender, this.theme.pink]
+    const flow = (Date.now() / 1000) * 0.3
+    const barParts: TextChunk[] = []
+    for (let j = 0; j < filled; j++) {
+      barParts.push(fg(paletteAt(pal, j / Math.max(1, filled) + flow))("█"))
+    }
+    if (barw - filled > 0) barParts.push(fg(this.theme.surface1)("░".repeat(barw - filled)))
+    barParts.push(fg(this.theme.subtext)(` ${fmt(Math.max(0, tpos))} / ${durText}`))
+    this.fullProgress.content = new StyledText(barParts)
     if (!p.lyrics.length) {
       for (let i = 0; i < this.fullLyricRows.length; i++) {
         this.fullLyricRows[i].content =

@@ -1,6 +1,6 @@
 {
   "name": "lxm-tui",
-  "version": "r-0.6",
+  "version": "r-0.7",
   "description": "本地音乐播放器 (OpenTUI + mpv)",
   "type": "module",
   "module": "index.ts",

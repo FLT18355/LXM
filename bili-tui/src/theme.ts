@@ -11,6 +11,7 @@ export type Theme = {
   crust: string
   surface0: string
   surface1: string
+  surface2: string
   overlay: string
   subtext: string
   text: string
@@ -23,6 +24,11 @@ export type Theme = {
   red: string
   mauve: string
   cyan: string
+  teal: string
+  pink: string
+  sky: string
+  /** 品牌渐变三色 (用于顶栏饰条) */
+  grad: [string, string, string]
 }
 
 /** Mocha — 深色, 原版默认 */
@@ -32,6 +38,7 @@ const mocha: Theme = {
   crust: "#11111b",
   surface0: "#313244",
   surface1: "#45475a",
+  surface2: "#585b70",
   overlay: "#6c7086",
   subtext: "#a6adc8",
   text: "#cdd6f4",
@@ -44,6 +51,10 @@ const mocha: Theme = {
   red: "#f38ba8",
   mauve: "#cba6f7",
   cyan: "#89dceb",
+  teal: "#94e2d5",
+  pink: "#f5c2e7",
+  sky: "#89dceb",
+  grad: ["#89b4fa", "#cba6f7", "#f38ba8"],
 }
 
 /** Latte — 浅色, 明亮背景 */
@@ -53,6 +64,7 @@ const latte: Theme = {
   crust: "#dce0e8",
   surface0: "#ccd0da",
   surface1: "#bcc0cc",
+  surface2: "#9ca0b0",
   overlay: "#9ca0b0",
   subtext: "#6c6f85",
   text: "#4c4f69",
@@ -65,6 +77,10 @@ const latte: Theme = {
   red: "#d20f39",
   mauve: "#8839ef",
   cyan: "#04a5e5",
+  teal: "#179299",
+  pink: "#ea76cb",
+  sky: "#04a5e5",
+  grad: ["#1e66f5", "#8839ef", "#d20f39"],
 }
 
 export const THEMES: Record<ThemeName, Theme> = { mocha, latte }

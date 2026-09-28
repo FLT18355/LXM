@@ -176,6 +176,7 @@ async function main() {
     if (exited) return
     exited = true
     if (interval) clearInterval(interval)
+    ui.stopAnimLoop() // 先停动效帧, 再销毁渲染树 (防定时器回调踩已销毁节点)
     try {
       player.saveState()
     } catch {
@@ -222,6 +223,7 @@ async function main() {
   if (Number.isFinite(savedDelay) && savedDelay >= -5 && savedDelay <= 5) player.lyricDelay = savedDelay
 
   const ui = new PlayerUI(renderer, player, parseThemeName(cfg["theme"]))
+  ui.startAnimLoop() // 装饰动效 (~30fps, 待机降频; 与 100ms tick 解耦)
 
   // ---------- 主循环 (100ms) ----------
   interval = setInterval(() => {
@@ -302,6 +304,7 @@ async function main() {
     if (!exited) {
       exited = true
       if (interval) clearInterval(interval)
+      ui.stopAnimLoop()
       try {
         player.saveState()
       } catch {

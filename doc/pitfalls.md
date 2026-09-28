@@ -16,3 +16,4 @@
 | 歌曲改名/删除后子目录内文件不在 scan-cache 里更新 | mtime 只看音乐目录**根**: 子目录里的文件改名/删除不改根 mtime → 下次启动照样复用旧列表 (幽灵条目)。`R`/`D` 必须调 `renameInScanCache`/`dropFromScanCache` 手动同步 (track-ops-test 专门守这条) |
 | 删除正在播放的歌曲触发自动切歌 | `stop` 也会发 end-file, 会被当成自然播完而跳下一首。`stopPlayback()` 复用 suppressEndFile 抑制窗口后再 stop |
 | `r`/`d` 与 `R`/`D` 混淆 | 小写 `r`/`d` 只在歌单视图 (重命名/删除歌单、移除曲目); 大写 `R`/`D` 是歌曲文件编辑, 全局可用。改按键时别让两者相撞 |
+| 动效定时器在树销毁后才停 → 回调踩已销毁节点 | `ui.stopAnimLoop()` 必须在 `renderer.destroy()` 之前 (shutdown 与 renderer `destroy` 兜底两处都调)。动效循环由入口显式启动, 测试不启动 (见 ui.md 装饰动效循环) |

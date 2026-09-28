@@ -15,9 +15,11 @@ import {
   t,
   bold,
   fg,
+  bg,
   type CliRenderer,
   type KeyEvent,
-  type StyledText,
+  StyledText,
+  type TextChunk,
 } from "@opentui/core"
 import { existsSync, mkdirSync } from "fs"
 import { homedir } from "os"
@@ -37,24 +39,32 @@ import {
   type DownloadSpec,
 } from "./ytdlp"
 import { loadConfig, saveConfig, defaultDownloadDir, defaultCookiesFile, type Config } from "./config"
+import { truncateW, chip, keycap, keyHint, progressBar, padStartW, ICON, displayWidth } from "./ui-helpers"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
 
 type Stage = "idle" | "probing" | "video" | "list" | "downloading" | "done" | "error"
 type Mode = "video" | "audio"
 
-const HELP_LINES: [string, string][] = [
-  ["支持范围", "仅哔哩哔哩: 视频 / 番剧 / 多P合集, 以及音频 (音乐)"],
-  ["解析", "把链接粘贴到上方 URL 栏, Enter 解析 (bilibili.com / b23.tv)"],
-  ["模式", "v = 视频画质 · a = 音乐音质"],
-  ["选格式", "画质页: ↑↓/jk 选择, Enter 下载; 列表页: 空格勾选, d 批量下载"],
-  ["下载中", "c 取消当前任务, 下方日志滚动显示 yt-dlp 输出"],
-  ["完成后", "Enter/Esc 返回上一级 · o 打开下载目录"],
-  ["设置", "s 修改下载目录 (Esc 关闭弹层)"],
-  ["主题", "t 循环切换主题 (Mocha 摩卡 ⇄ Latte 拿铁), 自动保存"],
-  ["通用", "Tab 切换 URL 栏焦点 · q 退出 · Ctrl+C 强退"],
+/** [按键列表, 说明] — 用于 idle 屏快捷键面板 */
+const HELP_LINES: [string[], string][] = [
+  [["Enter"], "解析 URL 栏中的哔哩哔哩链接"],
+  [["v", "a"], "切换视频画质 / 音乐音质"],
+  [["↑", "↓", "j", "k"], "在画质列表 / 分P列表中移动"],
+  [["Space"], "分P列表勾选当前项"],
+  [["d"], "下载已勾选的分P (合集批量)"],
+  [["Enter"], "画质页直接下载当前项"],
+  [["c"], "下载中取消当前任务"],
+  [["s"], "修改下载目录 (Esc 关闭弹层)"],
+  [["t"], "循环切换主题 (摩卡 ⇄ 拿铁)"],
+  [["o"], "下载完成后打开下载目录"],
+  [["Esc"], "返回上一级 / 退出"],
+  [["q"], "退出程序 · Ctrl+C 强退"],
 ]
 
 const MAX_LOG_LINES = 300
+
+/** 解析阶段 spinner 帧 (盲文点阵) */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 function fmtDuration(sec: number): string {
   const s = Math.max(0, Math.round(sec))
@@ -65,7 +75,7 @@ function fmtDuration(sec: number): string {
 }
 
 function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s
+  return truncateW(s, n)
 }
 
 export class App {
@@ -99,11 +109,23 @@ export class App {
   private dlMeta!: TextRenderable
   private dlStatus!: TextRenderable
   private logBox!: ScrollBoxRenderable
-  private resultBox!: BoxRenderable
   private resultTitle!: TextRenderable
   private resultBody!: TextRenderable
   private statusBar!: TextRenderable
   private msgBar!: TextRenderable
+  private resultBox!: BoxRenderable
+  private gradBar!: TextRenderable
+  private urlLabel!: TextRenderable
+  private idleBanner!: TextRenderable
+  private idleSub!: TextRenderable
+  private idleKeyWrap!: BoxRenderable
+  private spinnerIdx = 0
+  private spinnerTimer: ReturnType<typeof setInterval> | undefined
+  /** spinner 旁的静态文案 */
+  private busyBase = ""
+  /** banner 波浪相位 + 定时器 (仅 idle / probing 阶段运行) */
+  private bannerPhase = 0
+  private bannerTimer: ReturnType<typeof setInterval> | undefined
   private dirOverlay!: BoxRenderable
   private dirInput!: InputRenderable
 
@@ -139,6 +161,8 @@ export class App {
     const markDead = (): void => {
       if (this.destroyed) return
       this.destroyed = true
+      this.stopSpinner()
+      this.stopBanner()
       try {
         this.r.destroy()
       } catch {
@@ -166,14 +190,15 @@ export class App {
 
   private build(): void {
     const r = this.r
+    const th = this.theme
     const root = new BoxRenderable(r, {
       width: "100%",
       height: "100%",
       flexDirection: "column",
-      backgroundColor: this.theme.base,
+      backgroundColor: th.base,
     })
 
-    // 顶栏
+    // ── 顶栏: 品牌 + 阶段 + 主题 ──
     const header = new BoxRenderable(r, {
       height: 1,
       flexDirection: "row",
@@ -181,138 +206,220 @@ export class App {
       alignItems: "center",
       paddingLeft: 1,
       paddingRight: 1,
-      backgroundColor: this.theme.mantle,
+      backgroundColor: th.mantle,
     })
     header.add(
       new TextRenderable(r, {
-        content: t`${bold(fg(this.theme.blue)(" bili-tui "))}${fg(this.theme.overlay)("  ·  哔哩哔哩下载  (yt-dlp)")}`,
+        content: t`${bg(th.blue)(bold(fg(th.crust)(` ${ICON.video} bili-tui `)))}${fg(th.overlay)("  ▸ ")}${fg(th.subtext)("哔哩哔哩下载")}${fg(th.overlay)("  ·  yt-dlp")}`,
         selectable: false,
+        wrapMode: "none",
       }),
     )
-    this.stageHint = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none" })
-    header.add(this.stageHint)
+    const headerRight = new BoxRenderable(r, { height: 1, flexDirection: "row", alignItems: "center", gap: 1 })
+    this.stageHint = new TextRenderable(r, { content: "", fg: th.subtext, selectable: false, wrapMode: "none" })
+    headerRight.add(this.stageHint)
+    header.add(headerRight)
     root.add(header)
 
-    // URL 栏
-    const urlRow = new BoxRenderable(r, {
+    // ── 渐变饰条 (1行) ──
+    this.gradBar = new TextRenderable(r, {
+      content: this.makeGradientLine(),
       height: 1,
+      selectable: false,
+      wrapMode: "none",
+    })
+    root.add(this.gradBar)
+
+    // ── URL 面板 (圆角边框) ──
+    const urlPanel = new BoxRenderable(r, {
       flexDirection: "row",
       alignItems: "center",
       gap: 1,
       paddingLeft: 1,
       paddingRight: 1,
+      marginLeft: 1,
+      marginRight: 1,
+      marginTop: 0,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.crust,
     })
-    urlRow.add(new TextRenderable(r, { content: t`${bold(fg(this.theme.blue)(" URL "))}`, selectable: false }))
+    this.urlLabel = new TextRenderable(r, {
+      content: t`${bold(fg(th.blue)("URL"))}${fg(th.overlay)("▸")}`,
+      selectable: false,
+      wrapMode: "none",
+    })
+    urlPanel.add(this.urlLabel)
     this.urlInput = new InputRenderable(r, {
       id: "url",
       flexGrow: 1,
-      minLength: 1,
+      minWidth: 1,
       placeholder: "粘贴哔哩哔哩链接 (video / av / bangumi / audio / b23.tv)  ·  Enter 解析",
-      backgroundColor: this.theme.surface0,
-      focusedBackgroundColor: this.theme.surface1,
-      textColor: this.theme.text,
-      cursorColor: this.theme.blue,
+      backgroundColor: th.crust,
+      focusedBackgroundColor: th.mantle,
+      textColor: th.text,
+      cursorColor: th.blue,
     })
     this.urlInput.on(InputRenderableEvents.ENTER, (v) => this.startProbe(v))
-    urlRow.add(this.urlInput)
-    root.add(urlRow)
+    urlPanel.add(this.urlInput)
+    // 解析按钮 (静态提示, 鼠标点击触发)
+    const parseBtn = new BoxRenderable(r, {
+      height: 1,
+      paddingLeft: 1,
+      paddingRight: 1,
+      backgroundColor: th.surface0,
+      onMouseDown: () => this.startProbe(this.urlInput.value),
+    })
+    parseBtn.add(new TextRenderable(r, { content: t`${bold(fg(th.green)(`${ICON.search} 解析`))}`, selectable: false, wrapMode: "none" }))
+    urlPanel.add(parseBtn)
+    root.add(urlPanel)
 
-    // 模式 + 目录行
+    // ── 模式 chip + 目录行 ──
     const modeRow = new BoxRenderable(r, {
       height: 1,
       flexDirection: "row",
       alignItems: "center",
       gap: 1,
       paddingLeft: 1,
-      backgroundColor: this.theme.crust,
+      paddingRight: 1,
+      marginTop: 0,
+      backgroundColor: th.crust,
     })
-    modeRow.add(new TextRenderable(r, { content: t`${fg(this.theme.overlay)("模式")}`, selectable: false }))
+    modeRow.add(new TextRenderable(r, { content: t`${fg(th.overlay)("模式")}`, selectable: false, wrapMode: "none" }))
     const vidTab = new BoxRenderable(r, {
       height: 1,
-      paddingLeft: 1,
-      paddingRight: 1,
-      backgroundColor: this.theme.surface0,
-      onMouseDown: () => {
-        if (this.videoInfo) this.switchMode("video")
-      },
+      backgroundColor: th.surface0,
+      onMouseDown: () => { if (this.videoInfo) this.switchMode("video") },
     })
-    this.vTabText = new TextRenderable(r, { content: " 视频 (v) ", fg: this.theme.blue, selectable: false })
+    this.vTabText = new TextRenderable(r, { content: `  ${ICON.video} 视频  `, fg: th.subtext, selectable: false, wrapMode: "none" })
     vidTab.add(this.vTabText)
     const audTab = new BoxRenderable(r, {
       height: 1,
-      paddingLeft: 1,
-      paddingRight: 1,
-      backgroundColor: this.theme.surface0,
-      onMouseDown: () => {
-        if (this.videoInfo) this.switchMode("audio")
-      },
+      backgroundColor: th.surface0,
+      onMouseDown: () => { if (this.videoInfo) this.switchMode("audio") },
     })
-    this.aTabText = new TextRenderable(r, { content: " 音乐 (a) ", fg: this.theme.subtext, selectable: false })
+    this.aTabText = new TextRenderable(r, { content: `  ${ICON.music} 音乐  `, fg: th.subtext, selectable: false, wrapMode: "none" })
     audTab.add(this.aTabText)
     modeRow.add(vidTab)
     modeRow.add(audTab)
-    modeRow.add(new TextRenderable(r, { content: t`${fg(this.theme.overlay)("  目录:")}`, selectable: false }))
-    this.dirText = new TextRenderable(r, { content: this.outDir, fg: this.theme.subtext, selectable: false, wrapMode: "none", flexShrink: 1 })
+    // 目录 chip
+    modeRow.add(new TextRenderable(r, { content: t`${fg(th.overlay)(`  ${ICON.folder} 目录`)}`, selectable: false, wrapMode: "none" }))
+    this.dirText = new TextRenderable(r, { content: this.outDir, fg: th.subtext, selectable: false, wrapMode: "none", flexShrink: 1 })
     modeRow.add(this.dirText)
     root.add(modeRow)
 
-    // idle / probing
+    // ── idle / probing: 居中欢迎屏 ──
     this.idleBox = new BoxRenderable(r, {
       flexDirection: "column",
       flexGrow: 1,
       flexBasis: 0,
+      alignItems: "center",
+      justifyContent: "center",
       paddingX: 2,
       paddingTop: 1,
-      backgroundColor: this.theme.base,
+      backgroundColor: th.base,
     })
-    this.idleBox.add(
-      new TextRenderable(r, {
-        content: t`${bold(fg(this.theme.blue)("把哔哩哔哩链接丢进水里, 等它浮上来。"))}`,
-        selectable: false,
-        marginBottom: 1,
-      }),
-    )
-    for (const [k, v] of HELP_LINES) {
-      this.idleBox.add(
-        new TextRenderable(r, {
-          content: t`${bold(fg(this.theme.lavender)(` ${k} `))}${fg(this.theme.overlay)(" ┊ ")}${v}`,
-          selectable: false,
-          wrapMode: "none",
-        }),
-      )
+    // ASCII banner
+    this.idleBanner = new TextRenderable(r, {
+      content: this.makeBanner(),
+      fg: th.blue,
+      selectable: false,
+      wrapMode: "none",
+      marginBottom: 1,
+    })
+    this.idleBox.add(this.idleBanner)
+    // 副标题
+    this.idleSub = new TextRenderable(r, {
+      content: t`${fg(th.lavender)("把哔哩哔哩链接丢进水里, 等它浮上来")}${fg(th.overlay)(`  ${ICON.tint}  `)}${fg(th.mauve)("Paste · Parse · Download")}`,
+      selectable: false,
+      wrapMode: "none",
+      marginBottom: 1,
+    })
+    this.idleBox.add(this.idleSub)
+    // 快捷键面板: 两列
+    this.idleKeyWrap = new BoxRenderable(r, {
+      flexDirection: "row",
+      gap: 4,
+      alignItems: "flex-start",
+    })
+    const colA = new BoxRenderable(r, { flexDirection: "column", gap: 0 })
+    const colB = new BoxRenderable(r, { flexDirection: "column", gap: 0 })
+    const half = Math.ceil(HELP_LINES.length / 2)
+    for (const [keys, desc] of HELP_LINES.slice(0, half)) {
+      colA.add(new TextRenderable(r, { content: keyHint(keys, desc, th), selectable: false, wrapMode: "none" }))
     }
-    this.busyText = new TextRenderable(r, { content: "", fg: this.theme.yellow, selectable: false, marginTop: 1 })
+    for (const [keys, desc] of HELP_LINES.slice(half)) {
+      colB.add(new TextRenderable(r, { content: keyHint(keys, desc, th), selectable: false, wrapMode: "none" }))
+    }
+    this.idleKeyWrap.add(colA)
+    this.idleKeyWrap.add(colB)
+    this.idleBox.add(this.idleKeyWrap)
+    this.busyText = new TextRenderable(r, { content: "", fg: th.yellow, selectable: false, wrapMode: "none", marginTop: 1 })
     this.idleBox.add(this.busyText)
     root.add(this.idleBox)
 
-    // video: 信息 + 格式菜单
+    // ── video: 信息卡 + 格式面板 ──
     this.videoBox = new BoxRenderable(r, {
       flexDirection: "column",
       flexGrow: 1,
       flexBasis: 0,
-      paddingX: 2,
-      paddingTop: 1,
+      paddingX: 1,
+      paddingTop: 0,
       gap: 1,
-      backgroundColor: this.theme.base,
+      backgroundColor: th.base,
       visible: false,
     })
-    this.vInfoText = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false, wrapMode: "none" })
-    this.videoBox.add(this.vInfoText)
+    // 信息卡: 圆角边框
+    const infoCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      marginLeft: 1,
+      marginRight: 1,
+      paddingX: 1,
+      paddingTop: 0,
+      paddingBottom: 0,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.crust,
+    })
+    this.vInfoText = new TextRenderable(r, { content: "", fg: th.text, selectable: false, wrapMode: "none" })
+    infoCard.add(this.vInfoText)
+    this.videoBox.add(infoCard)
+    // 格式面板: 边框
+    const fmtPanel = new BoxRenderable(r, {
+      flexDirection: "column",
+      flexGrow: 1,
+      flexBasis: 0,
+      marginLeft: 1,
+      marginRight: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.mantle,
+      title: " 清晰度 ",
+      titleColor: th.blue,
+    })
     this.fmtSelect = new SelectRenderable(r, {
       id: "formats",
       flexGrow: 1,
       flexBasis: 0,
       minHeight: 4,
-      backgroundColor: this.theme.base,
-      focusedBackgroundColor: this.theme.base,
-      textColor: this.theme.text,
-      focusedTextColor: this.theme.text,
-      selectedTextColor: this.theme.base,
-      selectedBackgroundColor: this.theme.blue,
-      descriptionColor: this.theme.overlay,
-      selectedDescriptionColor: this.theme.crust,
+      marginLeft: 1,
+      marginRight: 1,
+      marginTop: 0,
+      marginBottom: 0,
+      backgroundColor: th.mantle,
+      focusedBackgroundColor: th.mantle,
+      textColor: th.text,
+      focusedTextColor: th.text,
+      selectedTextColor: th.crust,
+      selectedBackgroundColor: th.blue,
+      descriptionColor: th.overlay,
+      selectedDescriptionColor: th.crust,
       wrapSelection: false,
       showScrollIndicator: true,
+      showSelectionIndicator: false,
     })
     this.fmtSelect.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
       const m = this.menu[index]
@@ -322,147 +429,275 @@ export class App {
       const m = this.menu[index]
       if (m) this.saveQuality(m.selector)
     })
-    this.videoBox.add(this.fmtSelect)
-    this.fmtHint = new TextRenderable(r, { content: "", selectable: false })
+    fmtPanel.add(this.fmtSelect)
+    this.videoBox.add(fmtPanel)
+    this.fmtHint = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none", marginLeft: 2 })
     this.videoBox.add(this.fmtHint)
     root.add(this.videoBox)
 
-    // list: 多P / 合集
+    // ── list: 多P / 合集 ──
     this.listBox = new BoxRenderable(r, {
       flexDirection: "column",
       flexGrow: 1,
       flexBasis: 0,
-      paddingX: 2,
-      paddingTop: 1,
-      backgroundColor: this.theme.base,
+      paddingX: 1,
+      paddingTop: 0,
+      backgroundColor: th.base,
       visible: false,
     })
-    const listHead = new BoxRenderable(r, { flexDirection: "row", justifyContent: "space-between", marginBottom: 1 })
-    this.lTitleText = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false, flexShrink: 1, wrapMode: "none" })
+    const listPanel = new BoxRenderable(r, {
+      flexDirection: "column",
+      flexGrow: 1,
+      flexBasis: 0,
+      marginLeft: 1,
+      marginRight: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.mantle,
+      title: " 分 P 列表 ",
+      titleColor: th.blue,
+    })
+    const listHead = new BoxRenderable(r, { flexDirection: "row", justifyContent: "space-between", marginLeft: 1, marginRight: 1, marginBottom: 0 })
+    this.lTitleText = new TextRenderable(r, { content: "", fg: th.text, selectable: false, flexShrink: 1, wrapMode: "none" })
     listHead.add(this.lTitleText)
-    this.lHintText = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none" })
+    this.lHintText = new TextRenderable(r, { content: "", fg: th.subtext, selectable: false, wrapMode: "none" })
     listHead.add(this.lHintText)
-    this.listBox.add(listHead)
+    listPanel.add(listHead)
     this.entriesBox = new ScrollBoxRenderable(r, {
       flexGrow: 1,
       flexBasis: 0,
+      marginLeft: 1,
+      marginRight: 1,
       stickyScroll: false,
-      scrollbarOptions: { trackOptions: { foregroundColor: this.theme.surface1, backgroundColor: this.theme.base } },
-      rootOptions: { backgroundColor: this.theme.base },
-      contentOptions: { backgroundColor: this.theme.base },
+      scrollbarOptions: { trackOptions: { foregroundColor: th.surface1, backgroundColor: th.mantle } },
+      rootOptions: { backgroundColor: th.mantle },
+      contentOptions: { backgroundColor: th.mantle },
     })
-    this.listBox.add(this.entriesBox)
-    this.listBox.add(
+    listPanel.add(this.entriesBox)
+    listPanel.add(
       new TextRenderable(r, {
-        content: t`${fg(this.theme.overlay)("↑↓/jk 移动 · 空格 勾选 · a 全选/清空 · Enter 单P选画质 · d 下载勾选 · Esc 返回")}`,
+        content: t`${fg(th.overlay)("↑↓/jk 移动 · 空格 勾选 · a 全选/清空 · Enter 单P · d 下载 · Esc 返回")}`,
         selectable: false,
+        wrapMode: "none",
+        marginLeft: 1,
       }),
     )
+    this.listBox.add(listPanel)
     root.add(this.listBox)
 
-    // downloading
+    // ── downloading ──
     this.dlBox = new BoxRenderable(r, {
       flexDirection: "column",
       flexGrow: 1,
       flexBasis: 0,
-      paddingX: 2,
-      paddingTop: 1,
-      backgroundColor: this.theme.base,
+      paddingX: 1,
+      paddingTop: 0,
+      backgroundColor: th.base,
       visible: false,
     })
-    this.dlName = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false, wrapMode: "none" })
-    this.dlBox.add(this.dlName)
-    this.dlBar = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none", marginTop: 1 })
-    this.dlBox.add(this.dlBar)
-    this.dlMeta = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none" })
-    this.dlBox.add(this.dlMeta)
-    this.dlStatus = new TextRenderable(r, { content: "", fg: this.theme.lavender, selectable: false, wrapMode: "none" })
-    this.dlBox.add(this.dlStatus)
+    const dlPanel = new BoxRenderable(r, {
+      flexDirection: "column",
+      flexGrow: 1,
+      flexBasis: 0,
+      marginLeft: 1,
+      marginRight: 1,
+      gap: 0,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.crust,
+      title: " 下载 ",
+      titleColor: th.green,
+    })
+    this.dlName = new TextRenderable(r, { content: "", fg: th.text, selectable: false, wrapMode: "none", marginLeft: 1, marginRight: 1 })
+    dlPanel.add(this.dlName)
+    this.dlBar = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none", marginLeft: 1, marginRight: 1, marginTop: 0 })
+    dlPanel.add(this.dlBar)
+    this.dlMeta = new TextRenderable(r, { content: "", fg: th.subtext, selectable: false, wrapMode: "none", marginLeft: 1, marginRight: 1 })
+    dlPanel.add(this.dlMeta)
+    this.dlStatus = new TextRenderable(r, { content: "", fg: th.lavender, selectable: false, wrapMode: "none", marginLeft: 1, marginRight: 1 })
+    dlPanel.add(this.dlStatus)
+    // 日志子面板
+    const logWrap = new BoxRenderable(r, {
+      flexDirection: "column",
+      flexGrow: 1,
+      flexBasis: 0,
+      marginLeft: 1,
+      marginRight: 1,
+      marginTop: 0,
+      border: true,
+      borderStyle: "single",
+      borderColor: th.surface0,
+      backgroundColor: th.crust,
+      title: " yt-dlp ",
+      titleColor: th.overlay,
+    })
     this.logBox = new ScrollBoxRenderable(r, {
       flexGrow: 1,
       flexBasis: 0,
       minHeight: 3,
-      marginTop: 1,
       stickyScroll: true,
       stickyStart: "bottom",
-      scrollbarOptions: { trackOptions: { foregroundColor: this.theme.surface1, backgroundColor: this.theme.crust } },
-      rootOptions: { backgroundColor: this.theme.crust },
-      contentOptions: { backgroundColor: this.theme.crust },
+      scrollbarOptions: { trackOptions: { foregroundColor: th.surface1, backgroundColor: th.crust } },
+      rootOptions: { backgroundColor: th.crust },
+      contentOptions: { backgroundColor: th.crust },
     })
-    this.dlBox.add(this.logBox)
-    this.dlBox.add(new TextRenderable(r, { content: t`${fg(this.theme.overlay)("c 取消下载")}`, selectable: false }))
+    logWrap.add(this.logBox)
+    dlPanel.add(logWrap)
+    dlPanel.add(new TextRenderable(r, { content: t`${fg(th.overlay)("  c 取消下载")}`, selectable: false, wrapMode: "none", marginLeft: 1 }))
+    this.dlBox.add(dlPanel)
     root.add(this.dlBox)
 
-    // done / error
+    // ── done / error ──
     this.resultBox = new BoxRenderable(r, {
       flexDirection: "column",
       flexGrow: 1,
       flexBasis: 0,
+      alignItems: "center",
+      justifyContent: "center",
       paddingX: 2,
       paddingTop: 1,
       gap: 1,
-      backgroundColor: this.theme.base,
+      backgroundColor: th.base,
       visible: false,
     })
-    this.resultTitle = new TextRenderable(r, { content: "", fg: this.theme.green, selectable: false })
-    this.resultBox.add(this.resultTitle)
-    this.resultBody = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false })
-    this.resultBox.add(this.resultBody)
-    this.resultBox.add(
+    const resultCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      width: "80%",
+      minWidth: 50,
+      padding: 1,
+      gap: 1,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: th.surface0,
+      backgroundColor: th.crust,
+    })
+    this.resultTitle = new TextRenderable(r, { content: "", fg: th.green, selectable: false, wrapMode: "none" })
+    resultCard.add(this.resultTitle)
+    this.resultBody = new TextRenderable(r, { content: "", fg: th.text, selectable: false })
+    resultCard.add(this.resultBody)
+    resultCard.add(
       new TextRenderable(r, {
-        content: t`${fg(this.theme.overlay)("Enter/Esc 返回 · o 打开目录 · n 新链接 · q 退出")}`,
+        content: t`${keycap("Enter", th)}${fg(th.overlay)("/")} ${keycap("Esc", th)} ${fg(th.subtext)("返回")}${fg(th.overlay)("   ")}${keycap("o", th)} ${fg(th.subtext)("打开目录")}${fg(th.overlay)("   ")}${keycap("n", th)} ${fg(th.subtext)("新链接")}${fg(th.overlay)("   ")}${keycap("q", th)} ${fg(th.subtext)("退出")}`,
         selectable: false,
+        wrapMode: "none",
       }),
     )
+    this.resultBox.add(resultCard)
     root.add(this.resultBox)
 
-    // 底部
+    // ── 底栏 ──
     const footer = new BoxRenderable(r, {
       height: 1,
       flexDirection: "row",
       justifyContent: "space-between",
       paddingLeft: 1,
       paddingRight: 1,
-      backgroundColor: this.theme.mantle,
+      backgroundColor: th.mantle,
     })
-    this.statusBar = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none", flexShrink: 1 })
+    this.statusBar = new TextRenderable(r, { content: "", fg: th.subtext, selectable: false, wrapMode: "none", flexShrink: 1 })
     footer.add(this.statusBar)
-    this.msgBar = new TextRenderable(r, { content: "", fg: this.theme.yellow, selectable: false, wrapMode: "none", flexShrink: 1 })
+    this.msgBar = new TextRenderable(r, { content: "", fg: th.yellow, selectable: false, wrapMode: "none", flexShrink: 1 })
     footer.add(this.msgBar)
     root.add(footer)
 
-    // 目录设置弹层
+    // ── 目录设置弹层 (居中) ──
     this.dirOverlay = new BoxRenderable(r, {
       position: "absolute",
-      top: 2,
-      left: 2,
+      top: "30%",
+      left: "20%",
       width: "60%",
       minWidth: 50,
       flexDirection: "column",
       gap: 1,
       padding: 1,
-      backgroundColor: this.theme.mantle,
+      backgroundColor: th.mantle,
+      border: true,
       borderStyle: "rounded",
-      borderColor: this.theme.blue,
-      title: " 下载目录 ",
-      titleColor: this.theme.blue,
+      borderColor: th.blue,
+      title: ` ${ICON.folder} 下载目录 `,
+      titleColor: th.blue,
+      titleAlignment: "center",
       zIndex: 200,
       visible: false,
     })
-    this.dirOverlay.add(new TextRenderable(r, { content: "输入新目录路径 (Enter 保存 · Esc 取消):", fg: this.theme.subtext, selectable: false }))
+    this.dirOverlay.add(new TextRenderable(r, {
+      content: t`${fg(th.subtext)("输入新目录路径")}${fg(th.overlay)("  ·  ")}${keycap("Enter", th)} ${fg(th.subtext)("保存")}${fg(th.overlay)("  ")}${keycap("Esc", th)} ${fg(th.subtext)("取消")}`,
+      selectable: false,
+      wrapMode: "none",
+    }))
     this.dirInput = new InputRenderable(r, {
       id: "dir",
       value: this.outDir,
-      backgroundColor: this.theme.surface0,
-      focusedBackgroundColor: this.theme.surface1,
-      textColor: this.theme.text,
-      cursorColor: this.theme.blue,
+      backgroundColor: th.surface0,
+      focusedBackgroundColor: th.surface1,
+      textColor: th.text,
+      cursorColor: th.blue,
     })
     this.dirInput.on(InputRenderableEvents.ENTER, (v) => this.saveDir(v))
     this.dirOverlay.add(this.dirInput)
     root.add(this.dirOverlay)
 
     r.root.add(root)
+  }
+
+  /** 渐变饰条: 用主题 grad 三色铺满一行 */
+  private makeGradientLine(): StyledText {
+    const th = this.theme
+    const w = this.r.width
+    const seg = Math.max(1, Math.floor(w / 3))
+    const rest = w - seg * 3
+    return t`${fg(th.grad[0])("━".repeat(seg))}${fg(th.grad[1])("━".repeat(seg))}${fg(th.grad[2])("━".repeat(seg + rest))}`
+  }
+
+  /** 品牌 banner: 三行等宽, 中行文字精确居中 + 波浪流光 */
+  private makeBanner(): StyledText {
+    const th = this.theme
+    const inner = 36 // 框内宽度
+    const glyphs = Array.from("◆  b i l i - t u i  ◆")
+    const labelW = displayWidth(glyphs.join(""))
+    const left = Math.max(0, Math.floor((inner - labelW) / 2))
+    const right = Math.max(0, inner - labelW - left)
+    // 流光色环: 主题蓝 → 天蓝 → 薰衣草 → 紫 → 粉 → 青
+    const cycle = [th.blue, th.sapphire, th.lavender, th.mauve, th.pink, th.sky]
+    const chunks: TextChunk[] = [
+      fg(th.blue)(`╭${"━".repeat(inner)}╮`),
+      fg(th.blue)(`\n┃${" ".repeat(left)}`),
+    ]
+    for (let i = 0; i < glyphs.length; i++) {
+      const g = glyphs[i]
+      if (g === " ") {
+        chunks.push(fg(th.blue)(g))
+        continue
+      }
+      const p = (((i - this.bannerPhase) % cycle.length) + cycle.length) % cycle.length
+      chunks.push(fg(cycle[p])(g))
+    }
+    chunks.push(fg(th.blue)(`${" ".repeat(right)}┃`))
+    chunks.push(fg(th.blue)(`\n╰${"━".repeat(inner)}╯`))
+    return new StyledText(chunks)
+  }
+
+  /** 启动 banner 流光: 每 110ms 推进相位并重绘 */
+  private startBanner(): void {
+    if (this.bannerTimer) return
+    this.bannerTimer = setInterval(() => {
+      if (this.destroyed) {
+        this.stopBanner()
+        return
+      }
+      this.bannerPhase = (this.bannerPhase + 1) % 12
+      this.idleBanner.content = this.makeBanner()
+      this.r.requestRender()
+    }, 110)
+  }
+
+  private stopBanner(): void {
+    if (this.bannerTimer) {
+      clearInterval(this.bannerTimer)
+      this.bannerTimer = undefined
+    }
   }
 
   // ======================================================== 主题
@@ -474,21 +709,21 @@ export class App {
     const stage = this.stage
     const url = this.urlInput.value
     const dirVal = this.dirInput.value
-    const busy = this.busyText.content
+    const busyBase = this.busyBase
     const prog = this.prog
     const logText = this.logText
     const resTitle = this.resultTitle.content
     const resBody = this.resultBody.content
 
+    this.stopSpinner()
+    this.stopBanner()
     for (const ch of this.r.root.getChildren()) ch.destroyRecursively()
     this.themeName = name
     this.theme = next
     this.logNodes = []
     this.build()
-    this.setStage("idle")
     this.urlInput.value = url
     this.dirInput.value = dirVal
-    this.busyText.content = busy
     this.prog = prog
     this.logText = logText
     this.resultTitle.content = resTitle
@@ -519,6 +754,7 @@ export class App {
         break
       case "probing":
         this.setStage("probing")
+        if (busyBase) this.startSpinner(busyBase)
         break
       default:
         this.setStage("idle")
@@ -575,17 +811,25 @@ export class App {
         this.resultBox.visible = true
         break
     }
+    // banner 流光只在欢迎屏可见时运行
+    if (s === "idle" || s === "probing") this.startBanner()
+    else this.stopBanner()
     this.renderStatus()
   }
 
   private renderTabs(): void {
+    const th = this.theme
     const vid = this.mode === "video"
-    this.vTabText.fg = vid ? this.theme.blue : this.theme.subtext
-    this.aTabText.fg = vid ? this.theme.subtext : this.theme.mauve
+    // 激活标签 = 实心 pill (高对比), 非激活 = 暗底
+    this.vTabText.fg = vid ? th.crust : th.subtext
+    this.vTabText.bg = vid ? th.blue : th.surface0
+    this.aTabText.fg = vid ? th.subtext : th.crust
+    this.aTabText.bg = vid ? th.surface0 : th.mauve
   }
 
   private renderStatus(): void {
-    this.statusBar.content = t`${fg(this.theme.overlay)(`主题: ${THEME_LABEL[this.themeName]} · 模式: ${this.mode === "video" ? "视频" : "音乐"} · 目录: ${this.outDir}`)}`
+    const th = this.theme
+    this.statusBar.content = t`${chip(THEME_LABEL[this.themeName], th, { fg: th.lavender })}${fg(th.overlay)("  ")}${chip(this.mode === "video" ? `${ICON.video} 视频` : `${ICON.music} 音乐`, th, { fg: this.mode === "video" ? th.blue : th.mauve })}${fg(th.overlay)("  ")}${chip(ICON.folder, th, { fg: th.subtext })}${fg(th.subtext)(truncate(this.outDir, 50))}`
   }
 
   private flash(msg: string, ok = false): void {
@@ -600,6 +844,46 @@ export class App {
 
   // ======================================================== 探测
 
+  /** 启动 spinner: 每 100ms 推进一帧并请求重绘 */
+  private startSpinner(base: string): void {
+    this.busyBase = base
+    this.stopSpinner()
+    this.spinnerIdx = 0
+    this.renderBusy()
+    this.spinnerTimer = setInterval(() => {
+      if (this.destroyed) {
+        this.stopSpinner()
+        return
+      }
+      this.spinnerIdx = (this.spinnerIdx + 1) % SPINNER.length
+      this.renderBusy()
+      this.r.requestRender()
+    }, 100)
+  }
+
+  private stopSpinner(): void {
+    if (this.spinnerTimer) {
+      clearInterval(this.spinnerTimer)
+      this.spinnerTimer = undefined
+    }
+  }
+
+  private renderBusy(): void {
+    if (!this.busyBase) {
+      this.busyText.content = t``
+      return
+    }
+    const frame = SPINNER[this.spinnerIdx % SPINNER.length]
+    this.busyText.content = t`${fg(this.theme.cyan)(frame)} ${fg(this.theme.yellow)(this.busyBase)}`
+  }
+
+  /** 结束 busy 状态: 停止 spinner 并清空提示 */
+  private clearBusy(): void {
+    this.stopSpinner()
+    this.busyBase = ""
+    this.busyText.content = t``
+  }
+
   private startProbe(raw: string): void {
     const u = raw.trim()
     if (!u) {
@@ -613,7 +897,7 @@ export class App {
     this.listInfo = null
     this.videoInfo = null
     this.setStage("probing")
-    this.busyText.content = t`${fg(this.theme.yellow)(`正在解析 ${truncate(u, 72)} …`)}`
+    this.startSpinner(`正在解析 ${truncate(u, 72)} …`)
     probe(u, this.cookiesFile)
       .then((p) => {
         if (this.destroyed || this.stage !== "probing") return
@@ -626,14 +910,14 @@ export class App {
 
   private probeError(e: Error): void {
     if (this.destroyed) return
-    this.busyText.content = t``
+    this.clearBusy()
     this.setStage("idle")
     this.urlInput.focus()
     this.flash(`解析失败: ${e.message}`)
   }
 
   private onProbe(p: Probe, url: string): void {
-    this.busyText.content = t``
+    this.clearBusy()
     if (p.kind === "list") {
       this.listInfo = p
       this.showList(p)
@@ -645,11 +929,11 @@ export class App {
     }
     // flat 探测没带 formats → 完整探测一次
     this.setStage("probing")
-    this.busyText.content = t`${fg(this.theme.yellow)("正在获取清晰度列表…")}`
+    this.startSpinner("正在获取清晰度列表…")
     probeFull(url, this.cookiesFile)
       .then((full) => {
         if (this.destroyed || this.stage !== "probing") return
-        this.busyText.content = t``
+        this.clearBusy()
         if (full.kind === "video" && full.formats.length) this.openVideo(full, url)
         else if (full.kind === "list") {
           this.listInfo = full
@@ -673,6 +957,7 @@ export class App {
 
   private buildVideoMenu(): void {
     const info = this.videoInfo
+    const th = this.theme
     if (!info) return
     if (this.mode === "video" && !info.hasVideo) this.mode = "audio"
     if (this.mode === "audio" && !info.hasAudio && info.hasVideo) this.mode = "video"
@@ -683,9 +968,12 @@ export class App {
     if (idx < 0) idx = 0
     this.fmtSelect.selectedIndex = idx
     const dur = info.duration ? fmtDuration(info.duration) : "?"
-    const up = info.uploader ? `  ·  UP: ${truncate(info.uploader, 24)}` : ""
-    this.vInfoText.content = t`${bold(fg(this.theme.text)(truncate(info.title, 100)))}${fg(this.theme.subtext)(`  ${dur}${up}`)}`
-    this.fmtHint.content = t`${fg(this.theme.overlay)(`${this.mode === "video" ? "画质" : "音质"}共 ${this.menu.length} 项 · ↑↓/jk 选择 · Enter 下载 · v/a 切换 · Esc 返回`)}`
+    // 信息卡: 标题 + chips (时长 / UP)
+    const durChip = chip(`${ICON.clock} ${dur}`, th, { fg: th.cyan })
+    const upChip: TextChunk | string = info.uploader ? chip(`UP ${truncate(info.uploader, 20)}`, th, { fg: th.peach }) : ""
+    const upSep: TextChunk | string = info.uploader ? fg(th.overlay)("  ") : ""
+    this.vInfoText.content = t`${bold(fg(th.text)(truncate(info.title, 80)))}\n${fg(th.overlay)("  ")}${durChip}${upSep}${upChip}`
+    this.fmtHint.content = t`${fg(th.overlay)("  ")}${keycap("↑↓", th)}${fg(th.subtext)(" 选择  ")}${keycap("Enter", th)}${fg(th.subtext)(" 下载  ")}${keycap("v", th)}/${keycap("a", th)}${fg(th.subtext)(" 切换  ")}${keycap("Esc", th)}${fg(th.subtext)(" 返回")}`
     this.renderTabs()
   }
 
@@ -693,6 +981,7 @@ export class App {
     if (!this.videoInfo) return
     this.mode = m
     this.buildVideoMenu()
+    this.setStage("video")
   }
 
   private saveQuality(selector: string): void {
@@ -713,39 +1002,49 @@ export class App {
   private renderEntries(): void {
     const info = this.listInfo
     if (!info) return
-    this.lTitleText.content = t`${bold(fg(this.theme.text)(truncate(info.title, 60)))}`
-    this.lHintText.content = t`${fg(this.theme.subtext)(`已选 ${this.selected.size} / 共 ${info.entries.length}`)}`
+    const th = this.theme
+    this.lTitleText.content = t`${bold(fg(th.text)(truncate(info.title, 60)))}`
+    this.lHintText.content = t`${fg(th.subtext)(`已选 ${this.selected.size} / 共 ${info.entries.length}`)}`
     for (const row of this.entryBoxes) this.entriesBox.remove(row)
     this.entryBoxes = []
     info.entries.forEach((e, i) => {
       const isSel = i === this.selIdx
       const checked = this.selected.has(i)
+      const zebra = i % 2 === 0 ? th.mantle : th.crust
       const box = new BoxRenderable(this.r, {
         id: `p${i}`,
         height: 1,
         flexDirection: "row",
+        alignItems: "center",
         paddingLeft: 1,
-        backgroundColor: isSel ? this.theme.surface1 : this.theme.base,
+        paddingRight: 1,
+        backgroundColor: isSel ? th.surface1 : zebra,
         onMouseDown: () => {
           this.selIdx = i
           this.togglePick(i)
         },
       })
+      // 复选标记
       box.add(
         new TextRenderable(this.r, {
-          content: checked ? t`${fg(this.theme.green)("[x]")}` : t`${fg(this.theme.overlay)("[ ]")}`,
+          content: checked ? t`${fg(th.green)("▣")}` : t`${fg(th.overlay)("□")}`,
           selectable: false,
+          wrapMode: "none",
         }),
       )
+      // P 编号 (右对齐)
+      const pLabel = `P${e.index ?? i + 1}`
       box.add(
         new TextRenderable(this.r, {
-          content: t`${fg(this.theme.overlay)(` P${e.index ?? i + 1}  `)}`,
+          content: t`${fg(isSel ? th.blue : th.overlay)(padStartW(pLabel, 5))} `,
           selectable: false,
+          wrapMode: "none",
         }),
       )
+      // 标题
       box.add(
         new TextRenderable(this.r, {
-          content: isSel ? t`${bold(fg(this.theme.text)(truncate(e.title, 76)))}` : t`${fg(this.theme.text)(truncate(e.title, 76))}`,
+          content: isSel ? t`${bold(fg(th.text)(truncate(e.title, 76)))}` : t`${fg(th.text)(truncate(e.title, 76))}`,
           selectable: false,
           flexShrink: 1,
           wrapMode: "none",
@@ -784,11 +1083,11 @@ export class App {
     const e = info?.entries[this.selIdx]
     if (!info || !e) return
     this.setStage("probing")
-    this.busyText.content = t`${fg(this.theme.yellow)(`正在解析 P${e.index ?? this.selIdx + 1} 的清晰度…`)}`
+    this.startSpinner(`正在解析 P${e.index ?? this.selIdx + 1} 的清晰度…`)
     probeFull(e.url, this.cookiesFile)
       .then((p) => {
         if (this.destroyed || this.stage !== "probing") return
-        this.busyText.content = t``
+        this.clearBusy()
         if (p.kind === "video") this.openVideo(p, e.url)
         else {
           this.setStage("list")
@@ -874,9 +1173,7 @@ export class App {
   }
 
   private renderBar(pct: number): StyledText {
-    const w = Math.max(20, Math.min(72, this.r.width - 8))
-    const filled = Math.round((Math.max(0, Math.min(100, pct)) / 100) * w)
-    return t`${fg(this.theme.green)("█".repeat(filled))}${fg(this.theme.surface1)("░".repeat(w - filled))}${fg(this.theme.subtext)(` ${pct.toFixed(1)}%`)}`
+    return progressBar(pct, this.theme, this.r.width - 6)
   }
 
   private onLog(line: string): void {
@@ -1040,6 +1337,13 @@ export class App {
       return
     }
 
+    // 设置: 任意阶段均可打开目录弹层 (输入框聚焦 / 弹层打开时已被上面的分支拦下)
+    if (seq === "s") {
+      this.showDirOverlay()
+      k.preventDefault()
+      return
+    }
+
     switch (name) {
       case "escape":
         this.onEscape()
@@ -1076,11 +1380,6 @@ export class App {
       }
       if (seq === "q") {
         this.quit()
-        k.preventDefault()
-        return
-      }
-      if (seq === "s") {
-        this.showDirOverlay()
         k.preventDefault()
         return
       }
@@ -1195,6 +1494,8 @@ export class App {
 
   private quit(): void {
     this.destroyed = true
+    this.stopSpinner()
+    this.stopBanner()
     if (this.job) this.job.kill()
     this.r.destroy()
   }
