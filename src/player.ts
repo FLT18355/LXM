@@ -23,16 +23,40 @@ import type { MpvClient } from "./mpv"
 export type RepeatMode = "OFF" | "ALL" | "ONE"
 export const REPEAT_CYCLE: RepeatMode[] = ["OFF", "ALL", "ONE"]
 
+/** 列表排序字段 (r-1.0); default = 扫描路径顺序 */
+export type SortMode = "default" | "title" | "duration" | "plays" | "ext" | "dir"
+export const SORT_MODES: SortMode[] = ["default", "title", "duration", "plays", "ext", "dir"]
+export const SORT_LABEL: Record<SortMode, string> = {
+  default: "默认 (路径)",
+  title: "歌名",
+  duration: "时长",
+  plays: "播放次数",
+  ext: "格式",
+  dir: "所在目录",
+}
+
+/** 解析排序字段 (配置字符串 → SortMode, 无效回退 default) */
+export function parseSortMode(raw: unknown): SortMode {
+  const s = String(raw ?? "").trim().toLowerCase()
+  return (SORT_MODES as string[]).includes(s) ? (s as SortMode) : "default"
+}
+
 /** 睡眠定时器预设 (分钟); 0 = 关闭 */
 export const SLEEP_PRESETS = [0, 15, 30, 60, 90]
 
 export class Player {
   playlist: string[] = []
+  /** 主音乐目录 (musicDirs[0], 兼容旧字段/配置) */
   musicDir = ""
+  /** r-1.0: 全部音乐目录 (多目录合并扫描) */
+  musicDirs: string[] = []
   idx = 0
   queue: number[] = []
   repeat: RepeatMode = "OFF"
   isShuffle = false
+  /** r-1.0: 列表排序字段与方向 (持久化到 config) */
+  sortMode: SortMode = "default"
+  sortAsc = true
   /** mpv 连接完成 (延迟启动期间为 false, UI 据此挡住播放操作) */
   mpvReady = false
 
@@ -91,8 +115,37 @@ export class Player {
 
   // ---------- 列表逻辑 ----------
 
+  /**
+   * 队列可播性兜底 (r-1.0): 队列被清空/移除到空时, 用整库重建队列,
+   * 当前曲位置保持不变 (随机模式则重新洗牌, 当前曲仍在队首)。
+   *
+   * 没有这道检测时: `c` 清空后再 `x` 掉最后一项 → queue=[],
+   * `advance()`/`nextIndex()` 直接 return → n/p 切歌与播完自动续播全部失效。
+   *
+   * @returns 是否存在可播放的队列
+   */
+  ensureQueue(): boolean {
+    if (this.queue.length) return true
+    if (!this.playlist.length) return false
+    const curPath = this.currentPath
+    const found = curPath ? this.playlist.indexOf(curPath) : -1
+    const safeIdx = found >= 0 ? found : Math.max(0, Math.min(this.playlist.length - 1, this.idx))
+    if (this.isShuffle) {
+      const rest = Array.from({ length: this.playlist.length }, (_, i) => i).filter((i) => i !== safeIdx)
+      for (let i = rest.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[rest[i], rest[j]] = [rest[j], rest[i]]
+      }
+      this.queue = [safeIdx, ...rest]
+    } else {
+      this.queue = Array.from({ length: this.playlist.length }, (_, i) => i)
+    }
+    this.idx = safeIdx
+    return true
+  }
+
   nextIndex(step = 1): number | null {
-    if (!this.queue.length) return null
+    if (!this.ensureQueue()) return null
     if (this.queue.length === 1) return this.queue[0]
     const pos = this.queue.indexOf(this.idx)
     const base = pos === -1 ? 0 : pos
@@ -105,6 +158,8 @@ export class Player {
     if (!this.playlist.length) return
     // 延迟启动: mpv 未就绪时播放请求直接跳过 (UI 已显示但还不能播)
     if (!this.mpvReady) return
+    // 队列已空时先自愈 (清空后直接选歌播放也能恢复切歌链)
+    this.ensureQueue()
     this.idx = ((i % this.playlist.length) + this.playlist.length) % this.playlist.length
     const path = this.playlist[this.idx]
     this.currentPath = path
@@ -173,7 +228,7 @@ export class Player {
   }
 
   async advance(step = 1): Promise<void> {
-    if (!this.queue.length) return
+    if (!this.ensureQueue()) return
     const cur = this.idx
     const pos = this.queue.indexOf(cur)
     const base = pos === -1 ? 0 : pos
@@ -216,6 +271,124 @@ export class Player {
     // 即时应用到 mpv: 单曲循环靠 loop-file 属性 (切换时无需等下一首)
     this.mpv.setProperty("loop-file", this.repeat === "ONE" ? "inf" : "no")
   }
+
+  // ---------- 队列管理 (r-1.0: 播放队列视图 / 插队 / 加队) ----------
+
+  /** 队列内当前曲位置; -1 表示当前曲不在队列中 */
+  queuePos(): number {
+    return this.queue.indexOf(this.idx)
+  }
+
+  /** 下一首播放 (插队): 插到当前曲之后; 已存在则先移走 */
+  queueInsertNext(realIdx: number): boolean {
+    if (realIdx < 0 || realIdx >= this.playlist.length) return false
+    const pos = this.queue.indexOf(realIdx)
+    if (pos !== -1) this.queue.splice(pos, 1)
+    let at = this.queue.indexOf(this.idx)
+    if (at === -1) at = this.queue.length - 1
+    this.queue.splice(at + 1, 0, realIdx)
+    return true
+  }
+
+  /** 加入队列末尾: 已存在则移到末尾 */
+  queueAppend(realIdx: number): boolean {
+    if (realIdx < 0 || realIdx >= this.playlist.length) return false
+    const pos = this.queue.indexOf(realIdx)
+    if (pos !== -1) this.queue.splice(pos, 1)
+    this.queue.push(realIdx)
+    return true
+  }
+
+  /** 从队列移除某位置; 返回被移除的真实下标 (越界返回 null) */
+  queueRemoveAt(pos: number): number | null {
+    if (pos < 0 || pos >= this.queue.length) return null
+    const [removed] = this.queue.splice(pos, 1)
+    return removed ?? null
+  }
+
+  /** 队列内上/下移动一项; 返回移动后的新位置 (未移动返回原位置) */
+  queueMove(pos: number, delta: number): number {
+    if (pos < 0 || pos >= this.queue.length) return pos
+    const to = pos + delta
+    if (to < 0 || to >= this.queue.length) return pos
+    const [item] = this.queue.splice(pos, 1)
+    this.queue.splice(to, 0, item)
+    return to
+  }
+
+  /**
+   * 清空待播队列: 正在播放时只保留当前曲; 否则恢复完整库顺序。
+   * 返回清空后的队列长度。
+   */
+  queueClear(): number {
+    if (this.queue.includes(this.idx)) {
+      this.queue = [this.idx]
+    } else if (this.playlist.length) {
+      this.queue = Array.from({ length: this.playlist.length }, (_, i) => i)
+      this.idx = 0
+    } else {
+      this.queue = []
+    }
+    return this.queue.length
+  }
+
+  /** 队列顺序立即生效到 mpv 的方式: 无需下发给 mpv (advance 只读 queue) */
+
+  // ---------- 列表排序 (r-1.0) ----------
+
+  /** 当前排序的比较键 */
+  private sortKey(path: string): string | number {
+    switch (this.sortMode) {
+      case "title":
+        return titleOf(path).toLowerCase()
+      case "duration":
+        return this.durationOf(path)
+      case "plays":
+        return this.playCountOf(path)
+      case "ext":
+        return extname(path).toLowerCase()
+      case "dir":
+        return dirBase(path).toLowerCase()
+      default:
+        return path.toLowerCase()
+    }
+  }
+
+  /**
+   * 按 sortMode/sortAsc 重排 playlist。
+   * queue 按**路径**重映射 (顺序保持), idx 跟随当前曲; 绝对路径键 (favorites/歌单/缓存) 不受影响。
+   */
+  applySort(): void {
+    const old = this.playlist
+    const oldQueuePaths = this.queue.map((i) => old[i]).filter((p): p is string => typeof p === "string")
+    const curPath = this.currentPath
+    const dir = this.sortAsc ? 1 : -1
+    const sorted = [...old]
+    sorted.sort((a, b) => {
+      const ka = this.sortKey(a)
+      const kb = this.sortKey(b)
+      if (ka < kb) return -dir
+      if (ka > kb) return dir
+      return 0
+    })
+    this.playlist = sorted
+    const remapped = oldQueuePaths.map((p) => this.playlist.indexOf(p)).filter((i) => i >= 0)
+    this.queue = remapped.length ? remapped : this.playlist.map((_, i) => i)
+    if (curPath) {
+      const i = this.playlist.indexOf(curPath)
+      this.idx = i >= 0 ? i : 0
+    } else if (this.idx >= this.playlist.length) {
+      this.idx = Math.max(0, this.playlist.length - 1)
+    }
+  }
+
+  /** 设置排序字段/方向并立即重排 */
+  setSort(mode: SortMode, asc = this.sortAsc): void {
+    this.sortMode = mode
+    this.sortAsc = asc
+    this.applySort()
+  }
+
 
   // ---------- 收藏 ----------
 
@@ -308,9 +481,16 @@ export class Player {
 
   // ---------- 目录刷新 ----------
 
+  /** 扫描根目录列表: 优先 musicDirs (多目录), 回退主目录 (旧数据/测试) */
+  scanRoots(): string[] {
+    if (this.musicDirs.length) return this.musicDirs
+    return this.musicDir ? [this.musicDir] : []
+  }
+
   async refreshDir(): Promise<number> {
-    const { scanDirectory } = await import("./scanner")
-    const fresh = await scanDirectory(this.musicDir)
+    const { scanDirectories } = await import("./scanner")
+    const roots = this.scanRoots()
+    const fresh = await scanDirectories(roots)
     const oldReal = this.playlist[this.idx]
     // 保留当前播放位置
     let newIdx = this.idx
@@ -328,10 +508,12 @@ export class Player {
       this.idx = newIdx
       this.queue = Array.from({ length: fresh.length }, (_, i) => i)
     }
+    // 多目录/排序态下: 重扫后套用当前排序 (default + asc 时是路径序, 与扫描一致)
+    if (this.sortMode !== "default" || !this.sortAsc) this.applySort()
     return fresh.length
   }
 
-  // ---------- 歌曲文件操作 (重命名 / 删除, 见 doc/player.md) ----------
+  // ---------- 歌曲文件操作 (重命名 / 删除) ----------
 
   /** 停止当前播放 (删除正在播的歌曲时用): 用 suppressEndFile 抑制 stop 触发的 end-file 自动切歌 */
   stopPlayback(): void {
@@ -423,7 +605,7 @@ export class Player {
       if (!this.durations.has(newPath)) this.durations.set(newPath, dur)
     }
     renameTrackData(oldPath, newPath)
-    renameInScanCache(this.musicDir, oldPath, newPath)
+    renameInScanCache(this.scanRoots(), oldPath, newPath)
     return { ok: true, newPath }
   }
 
@@ -465,7 +647,7 @@ export class Player {
     }
     if (plChanged) savePlaylists(this.playlists)
     dropTrackData(path)
-    dropFromScanCache(this.musicDir, path)
+    dropFromScanCache(this.scanRoots(), path)
     return { ok: true }
   }
 

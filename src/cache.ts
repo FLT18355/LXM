@@ -68,8 +68,9 @@ export function saveState(patch: StateFile): void {
 // ---------- 扫描缓存 ----------
 
 export type ScanCache = {
-  dir: string
-  mtime: number
+  /** r-1.0: 支持多音乐目录 (旧版单目录 dir 字段仍兼容读取) */
+  dirs: string[]
+  mtimes: number[]
   files: string[]
 }
 
@@ -81,21 +82,67 @@ function dirMtime(dir: string): number {
   }
 }
 
-/** 目录未变时返回缓存文件列表, 否则 null (触发重扫)
- *  容差 500ms: 吸收"缓存文件本身写在被扫描目录内"时写入引起的目录 mtime 抖动
- *  (正常场景音乐目录 ≠ 缓存目录, 无偏差; 真实文件变化通常远超 500ms) */
-export function loadScanCache(dir: string): string[] | null {
-  const raw = readTomlFile(SCAN_CACHE_FILE)
-  if (raw["dir"] !== dir) return null
-  if (typeof raw["mtime"] !== "number" || Math.abs(raw["mtime"] - dirMtime(dir)) > 500) return null
-  if (!Array.isArray(raw["files"])) return null
-  const files = raw["files"].filter((x): x is string => typeof x === "string")
-  return files.length ? files : null
+/** 归一化目录入参 (单个字符串或数组) */
+function normDirs(input: string | string[]): string[] {
+  const arr = Array.isArray(input) ? input : [input]
+  return arr.filter((d): d is string => typeof d === "string" && d.length > 0)
 }
 
-export function saveScanCache(dir: string, files: string[]): void {
-  const cache: ScanCache = { dir, mtime: dirMtime(dir), files }
-  writeTomlFile(SCAN_CACHE_FILE, cache)
+/** 读取原始扫描缓存; 兼容旧版单目录格式 (dir: string + mtime: number) */
+function readScanCacheRaw(): ScanCache | null {
+  const raw = readTomlFile(SCAN_CACHE_FILE)
+  let dirs: string[] = []
+  if (Array.isArray(raw["dirs"])) {
+    dirs = (raw["dirs"] as unknown[]).filter((x): x is string => typeof x === "string")
+  } else if (typeof raw["dir"] === "string") {
+    dirs = [raw["dir"] as string]
+  }
+  if (!dirs.length) return null
+  let mtimes: number[] = []
+  if (Array.isArray(raw["mtimes"])) {
+    mtimes = (raw["mtimes"] as unknown[]).map((x) => {
+      const n = Number(x)
+      return Number.isFinite(n) ? n : 0
+    })
+  } else if (typeof raw["mtime"] === "number") {
+    mtimes = [raw["mtime"] as number]
+  }
+  const files = Array.isArray(raw["files"])
+    ? (raw["files"] as unknown[]).filter((x): x is string => typeof x === "string")
+    : []
+  return { dirs, mtimes, files }
+}
+
+/** 目录未变时返回缓存文件列表, 否则 null (触发重扫)
+ *  容差 500ms: 吸收"缓存文件本身写在被扫描目录内"时写入引起的目录 mtime 抖动
+ *  (正常场景音乐目录 ≠ 缓存目录, 无偏差; 真实文件变化通常远超 500ms)
+ *  多目录时要求目录列表完全一致且每个目录 mtime 均未变。 */
+export function loadScanCache(input: string | string[]): string[] | null {
+  const want = normDirs(input)
+  if (!want.length) return null
+  const raw = readScanCacheRaw()
+  if (!raw) return null
+  if (raw.dirs.length !== want.length) return null
+  for (let i = 0; i < want.length; i++) {
+    if (raw.dirs[i] !== want[i]) return null
+    const m = raw.mtimes[i]
+    if (typeof m !== "number" || Math.abs(m - dirMtime(want[i])) > 500) return null
+  }
+  return raw.files.length ? raw.files : null
+}
+
+export function saveScanCache(input: string | string[], files: string[]): void {
+  const dirs = normDirs(input)
+  if (!dirs.length) return
+  const mtimes = dirs.map(dirMtime)
+  // mtimes 以字符串数组存 (parseToml 的数组解析只认引号字符串)
+  const data: Record<string, unknown> = { dirs, mtimes: mtimes.map(String), files }
+  // 单目录时额外写旧格式字段, 便于降级/人工查看
+  if (dirs.length === 1) {
+    data["dir"] = dirs[0]
+    data["mtime"] = mtimes[0]
+  }
+  writeTomlFile(SCAN_CACHE_FILE, data)
 }
 
 /** 清空缓存目录所有文件; 返回删除的文件数 */
@@ -148,7 +195,12 @@ export function cacheSize(): number {
 //   path = "/abs/path/a.mp3"
 //   count = 12
 
-export type PlayCount = { path: string; count: number }
+export type PlayCount = {
+  path: string
+  count: number
+  /** r-1.0: 最近一次播放时间 (epoch ms); 旧缓存无此字段 */
+  last?: number
+}
 
 /** 整表写回 plays.toml (保留 [[plays]] 子表数组格式) */
 function writePlays(all: PlayCount[]): void {
@@ -158,6 +210,7 @@ function writePlays(all: PlayCount[]): void {
     lines.push("[[plays]]")
     lines.push(`path = "${p.path.replace(/"/g, '\\"')}"`)
     lines.push(`count = ${p.count}`)
+    if (typeof p.last === "number" && Number.isFinite(p.last)) lines.push(`last = ${Math.round(p.last)}`)
     lines.push("")
   }
   try {
@@ -175,13 +228,18 @@ export function loadPlays(): PlayCount[] {
     const out: PlayCount[] = []
     let path = ""
     let count = 0
+    let last: number | undefined
+    const flush = () => {
+      if (path) out.push(last === undefined ? { path, count } : { path, count, last })
+    }
     for (const raw of src.split("\n")) {
       const line = raw.trim()
       if (!line || line.startsWith("#")) continue
       if (line.startsWith("[[") && line.endsWith("]]")) {
-        if (path) out.push({ path, count })
+        flush()
         path = ""
         count = 0
+        last = undefined
         continue
       }
       const m = line.match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/)
@@ -193,24 +251,39 @@ export function loadPlays(): PlayCount[] {
       } else if (key === "count") {
         const n = Number(val)
         if (!Number.isNaN(n)) count = n
+      } else if (key === "last") {
+        const n = Number(val)
+        if (Number.isFinite(n)) last = n
       }
     }
-    if (path) out.push({ path, count })
+    flush()
     return out
   } catch {
     return []
   }
 }
 
-/** 单曲播放次数 +1 并写回; 返回新次数 */
-export function bumpPlay(path: string): number {
+/** 单曲播放次数 +1 并写回 (同时记录最近播放时间); 返回新次数 */
+export function bumpPlay(path: string, now = Date.now()): number {
   const all = loadPlays()
   const hit = all.find((x) => x.path === path)
   const n = (hit ? hit.count : 0) + 1
-  if (hit) hit.count = n
-  else all.push({ path, count: n })
+  if (hit) {
+    hit.count = n
+    hit.last = now
+  } else {
+    all.push({ path, count: n, last: now })
+  }
   writePlays(all)
   return n
+}
+
+/** 最近播放的若干条 (按 last 倒序; 无时间戳的旧条目排最后) */
+export function recentPlays(limit = 20): PlayCount[] {
+  return loadPlays()
+    .filter((x) => x.count > 0)
+    .sort((a, b) => (b.last ?? 0) - (a.last ?? 0))
+    .slice(0, limit)
 }
 
 /** 某首歌的播放次数 (没播过返回 0) */
@@ -309,6 +382,8 @@ export function renameTrackData(oldPath: string, newPath: string): void {
     const exist = plays.find((x) => x.path === newPath)
     if (exist) {
       exist.count += hit.count
+      const mergedLast = Math.max(exist.last ?? 0, hit.last ?? 0)
+      if (mergedLast > 0) exist.last = mergedLast
       plays.splice(plays.indexOf(hit), 1)
     } else {
       hit.path = newPath
@@ -336,31 +411,36 @@ export function dropTrackData(path: string): void {
   if (keptDurs.length !== durs.length) writeDurations(keptDurs)
 }
 
-/** 读取 scan-cache.toml 里 dir 对应的文件列表; dir 不匹配/无缓存返回 null */
-function scanCacheFiles(dir: string): string[] | null {
-  const raw = readTomlFile(SCAN_CACHE_FILE)
-  if (raw["dir"] !== dir || !Array.isArray(raw["files"])) return null
-  return (raw["files"] as unknown[]).filter((x): x is string => typeof x === "string")
+/** 读取扫描缓存里的文件列表; dirs 不匹配/无缓存返回 null */
+function scanCacheFiles(input: string | string[]): { dirs: string[]; files: string[] } | null {
+  const want = normDirs(input)
+  const raw = readScanCacheRaw()
+  if (!raw) return null
+  if (want.length) {
+    if (raw.dirs.length !== want.length) return null
+    for (let i = 0; i < want.length; i++) if (raw.dirs[i] !== want[i]) return null
+  }
+  return { dirs: raw.dirs, files: raw.files }
 }
 
 /** 目录内文件改名后同步扫描缓存。
  *  子目录里的文件改名不会改变音乐目录根的 mtime (loadScanCache 只看根), 不手动同步的话
  *  下次启动会复用旧路径列表 → 列表出现幽灵条目、新名丢失。 */
-export function renameInScanCache(dir: string, oldPath: string, newPath: string): void {
-  const files = scanCacheFiles(dir)
-  if (!files) return
-  const i = files.indexOf(oldPath)
+export function renameInScanCache(input: string | string[], oldPath: string, newPath: string): void {
+  const cache = scanCacheFiles(input)
+  if (!cache) return
+  const i = cache.files.indexOf(oldPath)
   if (i === -1) return
-  files[i] = newPath
-  saveScanCache(dir, files.sort())
+  cache.files[i] = newPath
+  saveScanCache(cache.dirs, cache.files.sort())
 }
 
 /** 目录内文件删除后同步扫描缓存 (理由同 renameInScanCache) */
-export function dropFromScanCache(dir: string, path: string): void {
-  const files = scanCacheFiles(dir)
-  if (!files) return
-  const i = files.indexOf(path)
+export function dropFromScanCache(input: string | string[], path: string): void {
+  const cache = scanCacheFiles(input)
+  if (!cache) return
+  const i = cache.files.indexOf(path)
   if (i === -1) return
-  files.splice(i, 1)
-  saveScanCache(dir, files)
+  cache.files.splice(i, 1)
+  saveScanCache(cache.dirs, cache.files)
 }

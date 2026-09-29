@@ -10,10 +10,10 @@ import { existsSync, rmSync, statSync } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 import { createCliRenderer } from "@opentui/core"
-import { CONFIG_FILE, loadConfig, saveConfig, writeConfig } from "./src/config"
-import { scanDirectory, scanDirectoryCached } from "./src/scanner"
+import { CONFIG_FILE, loadConfig, saveConfig, writeConfig, musicDirsFromConfig, saveMusicDirs } from "./src/config"
+import { scanDirectory, scanDirectoriesCached } from "./src/scanner"
 import { MpvClient, waitForSocket } from "./src/mpv"
-import { Player } from "./src/player"
+import { Player, parseSortMode } from "./src/player"
 import { probeDurations } from "./src/duration"
 import { PlayerUI } from "./src/ui"
 import { parseThemeName } from "./src/theme"
@@ -21,26 +21,27 @@ import { CACHE_DIR, STATE_FILE, SCAN_CACHE_FILE, DURATIONS_FILE, loadState, ensu
 import { VERSION } from "./src/version"
 
 const HELP = `
-本地音乐播放器 (OpenTUI + mpv)
+本地音乐播放器 (OpenTUI + mpv) · r-1.0
 
 版本: ${VERSION}
 
 用法:
-  bun index.ts [音乐目录]                        启动播放器
+  bun index.ts [音乐目录]                        启动播放器 (可多目录, 在 ${"\uF013"} 设置里管理)
   bun index.ts config [--music-directory DIR]   配置/查看音乐目录
   bun index.ts cache [--clear]                  查看/清空缓存目录
   bun index.ts -v | --version                   显示版本
 
 快捷键:
   空格/Enter  播放/暂停/播放选中   n/p  下一首/上一首
-  ←/→  ±5秒   [/]  ±10秒          倍速在 \uF013 设置调整
-  +/- 音量 (自动保存) ^v/jk 选择 s 随机
-  m 循环模式 / 搜索(支持中文) f/F 收藏
+  ←/→  ±5秒   [/]  ±10秒          ,/;  歌词延迟 ∓0.25s
+  +/- 音量 (自动保存) ↑↓/jk 选择   s 随机
+  m 循环模式  / 搜索(支持中文)     f/F 收藏
+  w 下一首播放(插队)              e 加入播放队列
+  o 排序菜单 (歌名/时长/次数/格式/目录)  S 音乐库统计
   R 重命名歌曲   D 删除歌曲 (改/删磁盘文件, 删除需确认)
-  l/L 歌词开关/全屏歌词 (KTV) d 重新扫描目录
-  g/G 列表首/尾   i 歌曲信息   z 睡眠定时 (到点自动暂停)
-  1/2/3/4 切换视图: 列表/收藏/歌单/设置 h 帮助 q/Esc 退出
-  h  帮助   q/Esc  退出
+  l/L 歌词开关/全屏歌词 (KTV)     d 重新扫描目录
+  g/G 列表首/尾   i 歌曲信息       z 睡眠定时 (到点渐弱暂停)
+  1/2/3/4/5 切换视图: 列表/收藏/歌单/设置/队列   h 帮助 q/Esc 退出
   M/0  静音
 `
 
@@ -60,16 +61,24 @@ async function handleConfig(args: string[]): Promise<void> {
       console.log(`目录不存在喵: ${musicDir}`)
       process.exit(1)
     }
-    saveConfig({ music_directory: musicDir })
+    // r-1.0: 新目录置顶为主目录, 保留已有其它目录
+    const cfg = loadConfig()
+    const dirs = [musicDir, ...musicDirsFromConfig(cfg).filter((d) => d !== musicDir)]
+    saveMusicDirs(dirs)
     console.log("已保存配置喵~")
     console.log(`  配置文件: ${CONFIG_FILE}`)
-    console.log(`  音乐目录: ${musicDir}`)
+    console.log(`  音乐目录 (${dirs.length} 个):`)
+    for (const d of dirs) console.log(`    ${d}`)
     return
   }
   const cfg = loadConfig()
-  if (cfg["music_directory"]) {
-    console.log(`当前音乐目录: ${cfg["music_directory"]}`)
+  const dirs = musicDirsFromConfig(cfg)
+  if (dirs.length) {
+    console.log(`当前音乐目录 (${dirs.length} 个):`)
+    for (const d of dirs) console.log(`    ${d}`)
     console.log(`  配置文件: ${CONFIG_FILE}`)
+    console.log("新增/置顶目录: bun index.ts config --music-directory /xxx/xx")
+    console.log(`删除目录: 启动后在 ${"\uF013"} 设置 → 音乐目录 里管理`)
   } else {
     console.log("尚未配置音乐目录喵~")
     console.log("用法: bun index.ts config --music-directory /xxx/xx")
@@ -124,25 +133,42 @@ async function main() {
     }
   }
 
-  // ---------- 确定音乐目录 (命令行 > 配置 > ~/Music) ----------
+  // ---------- 确定音乐目录 (命令行 > 配置 > ~/Music; r-1.0 支持多目录) ----------
   const cfg = loadConfig()
-  const musicDir = resolve(dirArg || (cfg["music_directory"] as string) || join(process.env.HOME || "~", "Music"))
-  try {
-    // statSync 免掉一次 Bun.spawn (本机 fork/exec 极慢, 省 3-4s)
-    if (!statSync(musicDir).isDirectory()) throw new Error("not a dir")
-  } catch {
-    console.log(`目录不存在喵: ${musicDir}`)
+  let musicDirs: string[] = []
+  if (dirArg) {
+    musicDirs = [resolve(dirArg)]
+  } else {
+    musicDirs = musicDirsFromConfig(cfg)
+    if (!musicDirs.length) musicDirs = [resolve(join(process.env.HOME || "~", "Music"))]
+  }
+  // 失效目录: 多目录时静默跳过 (并提示), 全军覆没才退出
+  const validDirs = musicDirs.filter((d) => {
+    try {
+      // statSync 免掉一次 Bun.spawn (本机 fork/exec 极慢, 省 3-4s)
+      return statSync(d).isDirectory()
+    } catch {
+      return false
+    }
+  })
+  if (!validDirs.length) {
+    console.log(`目录不存在喵: ${musicDirs[0]}`)
     console.log("可用 bun index.ts config --music-directory /xxx/xx 配置")
     process.exit(1)
   }
+  if (validDirs.length < musicDirs.length) {
+    for (const d of musicDirs) if (!validDirs.includes(d)) console.log(`跳过不存在的目录喵: ${d}`)
+  }
   ensureCacheDir()
 
-  const playlist = await scanDirectoryCached(musicDir)
+  const playlist = await scanDirectoriesCached(validDirs)
   if (!playlist.length) {
-    console.log(`在 ${musicDir} 中没找到音频文件喵~`)
+    console.log(`在 ${validDirs.join(", ")} 中没找到音频文件喵~`)
     process.exit(1)
   }
-  console.log(`扫描到 ${playlist.length} 首曲目喵~`)
+  console.log(
+    `扫描到 ${playlist.length} 首曲目喵~${validDirs.length > 1 ? ` (来自 ${validDirs.length} 个目录)` : ""}`,
+  )
 
   // ---------- 创建 renderer (先建 UI, mpv 延迟启动) ----------
   const renderer = await createCliRenderer({
@@ -207,9 +233,14 @@ async function main() {
   }
 
   const player = new Player(mpv)
-  player.musicDir = musicDir
+  player.musicDir = validDirs[0]
+  player.musicDirs = validDirs
   player.playlist = playlist
   player.queue = playlist.map((_, i) => i)
+  // r-1.0: 恢复排序偏好 (default + 升序 = 扫描路径序)
+  player.sortMode = parseSortMode(cfg["sort_mode"])
+  player.sortAsc = cfg["sort_asc"] !== false
+  if (player.sortMode !== "default" || !player.sortAsc) player.applySort()
   player.totalPlayCount = totalPlays()
   // 播放次数内存缓存 (行内显示用; 后续 playIndex 自动同步)
   player.loadPlayCounts()
@@ -265,7 +296,7 @@ async function main() {
     let lastPath = st.last_path ?? (cfg["last_path"] as string | undefined)
     let lastPos = Number(st.last_pos ?? cfg["last_pos"] ?? 0)
     if (lastPath) {
-      const idx = playlist.indexOf(lastPath)
+      const idx = player.playlist.indexOf(lastPath)
       if (idx !== -1) {
         player.idx = idx
         player.currentPath = lastPath

@@ -2,7 +2,7 @@
  * 配置读写 — 兼容 Python 版的 ~/.config/lxmusic/config.toml
  */
 import { homedir } from "os"
-import { join } from "path"
+import { join, resolve } from "path"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 
 export const CONFIG_DIR = join(homedir(), ".config", "lxmusic")
@@ -11,10 +11,55 @@ export const CONFIG_FILE = process.env["LXM_CONFIG_FILE"] || join(CONFIG_DIR, "c
 
 export type PlayerConfig = {
   music_directory?: string
+  /** r-1.0: 多音乐目录 (旧版单目录 music_directory 仍兼容并作为主目录) */
+  music_directories?: string[]
   favorites?: string[]
   last_path?: string
   last_pos?: number
   [key: string]: unknown
+}
+
+/**
+ * 从配置解析音乐目录列表 (r-1.0 多目录).
+ * 兼容旧版单目录 `music_directory`; 去重、绝对化、保持顺序。
+ * 主目录 (index 0) 同时回写为 `music_directory`, 与 Python 版 lxm.py 保持兼容。
+ */
+export function musicDirsFromConfig(cfg: Record<string, unknown>, fallback?: string): string[] {
+  const raw: string[] = []
+  const arr = cfg["music_directories"]
+  if (Array.isArray(arr)) {
+    for (const x of arr) if (typeof x === "string" && x.trim()) raw.push(x)
+  }
+  const single = cfg["music_directory"]
+  if (typeof single === "string" && single.trim()) raw.push(single)
+  if (fallback && fallback.trim()) raw.push(fallback)
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const d of raw) {
+    let abs = d
+    try {
+      abs = resolve(d)
+    } catch {
+      /* 非法路径原样保留, 后续 existsSync 会过滤 */
+    }
+    if (!seen.has(abs)) {
+      seen.add(abs)
+      out.push(abs)
+    }
+  }
+  return out
+}
+
+/** 持久化音乐目录列表 (同时维护主目录 music_directory 以兼容旧版) */
+export function saveMusicDirs(dirs: string[]): void {
+  const clean = dirs.filter((d) => !!d).map((d) => {
+    try {
+      return resolve(d)
+    } catch {
+      return d
+    }
+  })
+  saveConfig({ music_directories: clean, music_directory: clean[0] ?? "" })
 }
 
 const DEFAULT_HEADER = `# 本地音乐播放器配置文件

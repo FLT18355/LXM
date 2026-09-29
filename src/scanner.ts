@@ -40,10 +40,24 @@ export function baseName(p: string): string {
 
 /** 带缓存的目录扫描: 目录 mtime 未变时直接复用缓存, 否则全量扫描并更新缓存 */
 export async function scanDirectoryCached(root: string): Promise<string[]> {
-  const cached = loadScanCache(root)
+  return scanDirectoriesCached([root])
+}
+
+/** 扫描多个音乐目录, 合并去重后排序 (r-1.0 多目录) */
+export async function scanDirectories(dirs: string[]): Promise<string[]> {
+  const set = new Set<string>()
+  for (const d of dirs) {
+    for (const f of await scanDirectory(d)) set.add(f)
+  }
+  return [...set].sort()
+}
+
+/** 多目录带缓存扫描: 所有目录 mtime 均未变则复用缓存, 否则全量重扫 */
+export async function scanDirectoriesCached(dirs: string[]): Promise<string[]> {
+  const cached = loadScanCache(dirs)
   if (cached) return cached
-  const files = await scanDirectory(root)
-  saveScanCache(root, files)
+  const files = await scanDirectories(dirs)
+  saveScanCache(dirs, files)
   return files
 }
 

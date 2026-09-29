@@ -1,39 +1,20 @@
 /**
  * OpenTUI 界面 — Catppuccin 四口味主题音乐播放器
  *
- * 列表区四视图 tab: 播放列表 / 收藏 / 歌单 / 设置 (1/2/3/4 或鼠标点击切换)
+ * 列表区五视图 tab: 播放列表 / 收藏 / 歌单 / 设置 / 队列 (1/2/3/4/5 或鼠标点击切换)
  * 歌单 tab 内二级: 歌单列表 → 某歌单详情 (Enter 进入, Esc 返回)
  * 歌单详情内 a 进入"加歌选歌"模式 (Enter 加入, Esc 返回)
- * 设置 tab: 主题 / 音量 / 倍速 / 音乐目录 / 缓存
+ * 设置 tab: 主题 / 音量 / 倍速 / 歌词延迟 / 睡眠 / 音乐目录 / 排序 / 缓存 / 版本
  * 歌曲编辑: R 重命名歌曲文件 (弹层输入) · D 删除歌曲文件 (确认弹层) — 动的是磁盘文件
+ * 覆盖层: 帮助 h / 信息 i / 排序 o / 统计 S / 目录管理 / 歌单命名弹层 / 删除确认 / 通知浮层
  *
- * ── 区块导航 (改码用行号精准读取, 别整读 2400 行) ──
- * 177 类声明 + 状态字段
- * 269 constructor       289 buildTree            (组件树构建, ~500 行)
- * 789 attachGlobalKeys  794 attachInputEvents   804 attachDialogEvents
- * 813 attachMpvEvents   (mpv 事件 → player, 见 doc/mpv.md)
- * 851 handleKey         (按键路由, 见 doc/ui.md)
- * 1160 setView          1203 updateTabBar       1211 applyTabBar       1222 stepTabAnim
- * 1234 flash            1247 listCount          1263 moveSel           1271 playSel
- * 1295 playIndex        1299 afterTrackChange   1304 seek
- * 1309 seekFromMouse    1321 favCurrent
- * 1337 selectedSongPath 1355 renameSelectedSong 1366 deleteSelectedSong
- * 1386 askConfirm       1393 closeConfirm
- * 1402 settingEnter     1421 settingAdjust      1454 applyMusicDir
- * 1475 enterSearch      1486 doSearch           1517 exitSearch
- * 1550 refreshDir       1562 applyTheme         1627 cycleTheme  1635 quit
- * 1644 openPlDetail     1652 closePlDetail      1660 openPlDialog
- * 1686 closePlDialog    1698 commitPlDialog     1758 plEnter
- * 1793 plDelete         1816 enterPlPicker      1825 plPickerAdd
- * 1839 plPickerExit     1846 setFullLyrics      1853 openInfo
- * 1877 closeInfo        1885 rebuildPlaylistRows
- * 1930 onRowClick       1965 rowAt              2036 updatePlaylist
- * 2081 playlistTitle    2101 tick               (渲染管线, 见 doc/ui.md)
- * 2207 startAnimLoop    2212 stopAnimLoop       2219 syncAnimRate  2228 animTick
- * 2237 updateEq         2253 updateAccent       2272 updateNowPlaying
- * 2339 updateLyrics     2390 buildLyricRows     2406 updateFullLyrics
- * 动效循环 (30fps, 独立于 100ms tick) 只重画装饰: 等化器/彩虹条/进度条/分隔线/卡片边框/tab 过渡
- * 渐变工具在文件头 mixHex/paletteAt/pulse; 入口 index.ts 调 startAnimLoop/stopAnimLoop
+ * ── 维护约定 ──
+ * - 装饰动效走独立 animTick (30fps, 待机降频), 只重画 LOGO/等化器/彩虹条/频谱/进度条/tab/通知;
+ *   列表行的底色与文本由 updatePlaylist 独占写入, animTick 绝不碰, 否则两份真相源互踩会闪。
+ * - 跑马灯由 tick 的 advanceMarquee 推进, 相位锚定"最近一次选中变化", 换行时从 0 平滑重启。
+ * - applyTheme 是全树重建: 任何需要跨重建存活的 UI 状态都要写进备份/恢复清单。
+ * - 通知浮层节点必须懒创建 (在隐藏的 absolute 盒子里预建的文本节点之后不再渲染)。
+ * 渐变工具在文件头 mixHex/paletteAt/pulse; 入口 index.ts 调 startAnimLoop/stopAnimLoop。
  */
 import {
   BoxRenderable,
@@ -53,11 +34,12 @@ import {
 } from "@opentui/core"
 import { existsSync } from "fs"
 import { resolve } from "path"
-import { Player, REPEAT_CYCLE } from "./player"
+import { Player, REPEAT_CYCLE, SORT_MODES, SORT_LABEL, type SortMode } from "./player"
 import { titleOf } from "./scanner"
 import { THEMES, THEME_ORDER, THEME_LABEL, parseThemeName, type Theme, type ThemeName } from "./theme"
-import { loadConfig, saveConfig } from "./config"
+import { loadConfig, saveConfig, musicDirsFromConfig, saveMusicDirs } from "./config"
 import { CACHE_DIR, clearCache, ensureCacheDir } from "./cache"
+import { computeStats, fmtDuration, fmtAgo, type StatsBucket } from "./stats"
 import type { MpvEvent } from "./mpv"
 import { VERSION } from "./version"
 
@@ -67,11 +49,26 @@ const REPEAT_LABEL: Record<string, string> = {
   ONE: "单曲循环",
 }
 
-// 四视图 tab: 顺序即快捷键 1/2/3/4
-const TAB_KEYS: Array<"list" | "fav" | "pl" | "settings"> = ["list", "fav", "pl", "settings"]
-const TAB_LABELS = [" \uF03A 播放列表 ", " \uF004 收藏 ", " \uF1C5 歌单 ", " \uF013 设置 "]
+// 视图 tab: 顺序即快捷键 1/2/3/4/5
+// 注意: settings 必须保持在 index 3 (= 键 4), 队列视图排在最后 (键 5) — 兼容既有按键习惯与测试
+export type ViewName = "list" | "fav" | "pl" | "settings" | "queue"
+const TAB_KEYS: ViewName[] = ["list", "fav", "pl", "settings", "queue"]
+const TAB_LABELS = [
+  " \uF03A 播放列表 ",
+  " \uF004 收藏 ",
+  " \uF1C5 歌单 ",
+  " \uF013 设置 ",
+  " \uF0CA 队列 ",
+]
 
 const EQ_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆"]
+/** 频谱/条形图用的 8 级块字符 */
+const BLOCK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+/** 设置视图行数 (主题/音量/倍速/歌词延迟/睡眠/音乐目录/排序/缓存/版本) */
+const SETTING_ROW_COUNT = 9
+/** 通知浮层: 最多同屏条数 + 单条存活毫秒 */
+const TOAST_MAX = 3
+const TOAST_MS = 2100
 
 /** 动效帧间隔: 播放/全屏歌词时 30fps, 待机时降频省电 (渐变本身极慢, 5fps 也平滑) */
 const ANIM_FAST_MS = 33
@@ -194,18 +191,47 @@ export class PlayerUI {
   private lastLyricIdx = -1
   private lastPlTitle = ""
 
-  // 列表区四视图 tab: 播放列表 / 收藏 / 歌单 / 设置
-  view: "list" | "fav" | "pl" | "settings" = "list"
+  // 列表区视图 tab: 播放列表 / 收藏 / 歌单 / 设置 / 队列
+  view: ViewName = "list"
   plLevel: "list" | "detail" = "list" // 歌单 tab 内: 歌单列表 / 某歌单详情
   plPickerMode = false // 歌单详情 a 触发的"加歌选歌"
   plCurrent: string | null = null // 详情/选歌模式的当前歌单名
   private savedListSel = 0 // 进歌单前列表游标, 返回时恢复
   private savedFavSel = 0 // 进设置前收藏游标, 返回时恢复
+  private savedQueueSel = 0 // 进队列视图前游标, 返回时恢复
   private dirInput = "" // 设置: 改目录弹层输入缓冲
 
+  // ---------- r-1.0 新增 UI 状态 ----------
+  /** 排序菜单 (o 打开): 是否显示 + 光标所在字段 */
+  showSort = false
+  sortCursor = 0
+  /** 统计面板 (S 打开) */
+  showStats = false
+  /** 音乐目录管理弹层 (设置 → 音乐目录 Enter) */
+  showDirManager = false
+  dirCursor = 0
+  /** 睡眠定时渐弱: 起始音量 + 起始时间 + 是否进行中 */
+  private sleepFading = false
+  private sleepFadeFrom = 100
+  private sleepFadeAt = 0
+  /** 通知浮层 (flash 同时推一条) */
+  private toasts: Array<{ id: number; text: string; color: string; at: number }> = []
+  private toastSeq = 0
+  /** 视图切换过渡进度 0..1 */
+  private viewAnimT = 1
+  /**
+   * 跑马灯 (超长标题行内滚动) 稳定化:
+   * 相位以"最近一次选中变化"为锚点, 新选中行从 0 开始平滑滚动,
+   * 不再复用全局 tickCount (那会让快速上下切换时文字随机跳位 → 闪来闪去)。
+   */
+  private marqueeAnchor = 0
+  private lastMarqueeSel = -1
+  /** 当前选中行的跑马灯参数 (由 updatePlaylist 记录, tick 里推进) */
+  private selMarquee: { text: string; width: number } | null = null
+
   // 弹层输入态: "new" 新建歌单 / "rename" 重命名歌单 / "rename-song" 重命名歌曲文件
-  //            / "set-dir" 改音乐目录 / null 不弹
-  plDialogMode: "new" | "rename" | "rename-song" | "set-dir" | null = null
+  //            / "add-dir" 添加音乐目录 / null 不弹 ("set-dir" 为旧版遗留, 保留兼容)
+  plDialogMode: "new" | "rename" | "rename-song" | "set-dir" | "add-dir" | null = null
   plDialogValue = ""
   /** 重命名歌曲的目标文件 (开弹层时锁定, 免受 sel 变动影响) */
   pendingSongPath: string | null = null
@@ -216,6 +242,7 @@ export class PlayerUI {
 
   // ---------- 节点引用 ----------
   private eqText!: TextRenderable
+  private logoText!: TextRenderable
   private accentText!: TextRenderable
   private headModeText!: TextRenderable
   private headRightText!: TextRenderable
@@ -224,13 +251,22 @@ export class PlayerUI {
   private progressText!: TextRenderable
   private timeText!: TextRenderable
   private nowDivider!: TextRenderable
+  /** r-1.0: 正在播放卡片里的程序化频谱条 (1 行) */
+  private spectrumText!: TextRenderable
   private lyricInner!: BoxRenderable
   private lyricsBox!: BoxRenderable
   private lyricRows: TextRenderable[] = []
+  private plBox!: BoxRenderable
   private plTitle!: TextRenderable
   private plDivider!: TextRenderable
   private lastPlDivW = -1
-  private plRows: Array<{ box: BoxRenderable; num: TextRenderable; text: TextRenderable; meta: TextRenderable }> = []
+  private plRows: Array<{
+    box: BoxRenderable
+    lead: TextRenderable
+    num: TextRenderable
+    text: TextRenderable
+    meta: TextRenderable
+  }> = []
   private scrollbox!: ScrollBoxRenderable
   private statusLeft!: TextRenderable
   private statusRight!: TextRenderable
@@ -251,15 +287,34 @@ export class PlayerUI {
   // 确认弹层 (删除歌曲等破坏性操作)
   private confirmOverlay!: BoxRenderable
   private confirmText!: TextRenderable
-  // tab 栏 (播放列表 / 收藏 / 歌单 / 设置)
+  // tab 栏 (播放列表 / 收藏 / 歌单 / 设置 / 队列)
   private tabBar!: BoxRenderable
   private tabBtns: BoxRenderable[] = []
   private tabTexts: TextRenderable[] = []
+  /** r-1.0: tab 栏下滑动的激活指示条 (渐变, 平滑跟随当前 tab) */
+  private tabIndicator!: TextRenderable
+  private tabIndBox!: BoxRenderable
   // 导航栏播放统计 (设置按钮左边)
   private playsStat!: TextRenderable
   private playsTotal = 0
   private theme: Theme = THEMES.latte
   private themeName: ThemeName = "latte"
+
+  // ---------- r-1.0 覆盖层节点 ----------
+  // 排序菜单 (o)
+  private sortOverlay!: BoxRenderable
+  private sortRows: TextRenderable[] = []
+  // 统计面板 (S)
+  private statsOverlay!: BoxRenderable
+  private statsTitle!: TextRenderable
+  private statsRows: TextRenderable[] = []
+  // 音乐目录管理 (设置 → 音乐目录 Enter)
+  private dirOverlay!: BoxRenderable
+  private dirRows: TextRenderable[] = []
+  private dirHint!: TextRenderable
+  // 通知浮层 (底部右侧, 首次使用时懒创建节点)
+  private toastBoxes: Array<{ box: BoxRenderable; text: TextRenderable }> = []
+  private toastRoot: BoxRenderable | null = null
 
   // ---------- 装饰动效 (独立于 100ms tick 的动画帧) ----------
   /** 动效循环定时器; undefined = 未启动 (测试/无动画场景不会创建) */
@@ -268,6 +323,13 @@ export class PlayerUI {
   /** tab 颜色过渡: level 为当前插值值, target 为目标值 (0=闲置, 1=激活) */
   private tabLevel: number[] = []
   private tabTarget: number[] = []
+  /** 指示条当前位置 (tab 下标浮点), 每帧向激活 tab 缓动 */
+  private tabIndicatorPos = 0
+  /** 频谱每列峰值保持值 (缓慢回落, 制造"峰顶") */
+  private spectrumPeaks: number[] = []
+  /** 每首歌的频谱随机种子 (换歌波形换样) */
+  private spectrumSeed = 0.37
+  private spectrumSeedPath: string | null = null
 
   constructor(
     private renderer: CliRenderer,
@@ -278,7 +340,7 @@ export class PlayerUI {
     this.theme = THEMES[themeName] ?? THEMES.latte
     // 后台探测/播放回填时长后刷新列表 (行右侧格式/时长)
     this.p.onDurationsUpdated = () => {
-      if (this.view === "list" || this.view === "fav" || this.view === "pl") this.updatePlaylist()
+      if (this.view === "list" || this.view === "fav" || this.view === "pl" || this.view === "queue") this.updatePlaylist()
     }
     this.buildTree()
     this.attachGlobalKeys()
@@ -310,7 +372,9 @@ export class PlayerUI {
       backgroundColor: this.theme.mantle,
     })
     const headLeft = new BoxRenderable(r, { flexDirection: "row", alignItems: "center", gap: 1, flexShrink: 1 })
-    headLeft.add(new TextRenderable(r, { content: t`${bold(fg(this.theme.sky)("\uF025 蓝汐音乐"))}`, selectable: false }))
+    // 品牌 logo: 内容由 updateLogo 每帧画 (渐变流动 + 高光扫过)
+    this.logoText = new TextRenderable(r, { content: "\uF025 蓝汐音乐", fg: this.theme.sky, selectable: false, wrapMode: "none" })
+    headLeft.add(this.logoText)
     this.eqText = new TextRenderable(r, { content: "▁ ▁ ▁ ▁ ▁ ▁", fg: this.theme.lavender, selectable: false })
     headLeft.add(this.eqText)
     this.headModeText = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, wrapMode: "none" })
@@ -375,6 +439,11 @@ export class PlayerUI {
     this.timeText = new TextRenderable(r, { content: "00:00 / 00:00  0%", fg: this.theme.subtext, selectable: false })
     this.timeBox.add(this.timeText)
     this.nowPlayBox.add(this.timeBox)
+    // r-1.0: 程序化频谱可视化 (非真实 FFT, 无 cava 依赖) — 内容由 updateSpectrum 每帧画
+    const specRow = new BoxRenderable(r, { height: 1, flexDirection: "row", alignItems: "center" })
+    this.spectrumText = new TextRenderable(r, { content: "", selectable: false, flexGrow: 1, wrapMode: "none" })
+    specRow.add(this.spectrumText)
+    this.nowPlayBox.add(specRow)
     // 渐变分隔线 (卡片底部点缀: 居中缩窄, 内容由 updateNowPlaying 每帧画)
     const nowDivRow = new BoxRenderable(r, { flexDirection: "row", justifyContent: "center", height: 1 })
     this.nowDivider = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
@@ -443,10 +512,30 @@ export class PlayerUI {
     })
     this.tabBar.add(this.playsStat)
     root.add(this.tabBar)
+    // r-1.0: tab 激活指示条 (1 行, 渐变, 平滑滑动到当前 tab 下方)
+    const tabIndBox = new BoxRenderable(r, {
+      id: "tabIndBox",
+      height: 1,
+      flexDirection: "row",
+      marginLeft: 1,
+      marginRight: 1,
+      backgroundColor: this.theme.mantle,
+    })
+    this.tabIndicator = new TextRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      content: "",
+      selectable: false,
+      wrapMode: "none",
+    })
+    tabIndBox.add(this.tabIndicator)
+    this.tabIndBox = tabIndBox
+    root.add(tabIndBox)
     this.updateTabBar()
 
-    // ── 播放列表 (三视图共享此区) ──
-    const plBox = new BoxRenderable(r, {
+    // ── 播放列表 (多视图共享此区) ──
+    this.plBox = new BoxRenderable(r, {
       id: "plBox",
       flexDirection: "column",
       flexGrow: 2,
@@ -462,10 +551,10 @@ export class PlayerUI {
       titleColor: this.theme.sky,
     })
     this.plTitle = new TextRenderable(r, { content: "", fg: this.theme.subtext, selectable: false, paddingLeft: 1 })
-    plBox.add(this.plTitle)
+    this.plBox.add(this.plTitle)
     // 标题下的细分隔线 (宽度在 tick 里按布局刷新)
     this.plDivider = new TextRenderable(r, { content: "", fg: this.theme.surface1, selectable: false, paddingLeft: 1 })
-    plBox.add(this.plDivider)
+    this.plBox.add(this.plDivider)
     this.scrollbox = new ScrollBoxRenderable(r, {
       id: "scrollbox",
       flexGrow: 1,
@@ -476,8 +565,8 @@ export class PlayerUI {
       rootOptions: { backgroundColor: this.theme.base },
       contentOptions: { backgroundColor: this.theme.base },
     })
-    plBox.add(this.scrollbox)
-    root.add(plBox)
+    this.plBox.add(this.scrollbox)
+    root.add(this.plBox)
 
     // ── 底部状态栏 ──
     const statusBar = new BoxRenderable(r, {
@@ -551,13 +640,20 @@ export class PlayerUI {
       ]},
       { icon: "\uF03A", title: "列表导航", items: [
         ["↑↓ / jk  ·  g / G", "选择曲目 · 跳到首 / 尾"],
-        ["1 / 2 / 3 / 4", "列表 / 收藏 / 歌单 / 设置"],
+        ["1 / 2 / 3 / 4 / 5", "列表 / 收藏 / 歌单 / 设置 / 队列"],
+        ["o  ·  S", "排序菜单 · 音乐库统计面板"],
         ["鼠标", "点击行播放 · 点击 tab 切换"],
+      ]},
+      { icon: "\uF0CA", title: "播放队列", items: [
+        ["w  ·  e", "下一首播放 (插队) · 加入队列末尾"],
+        ["5", "队列视图: Enter 播放 · x 移除"],
+        ["J / K  ·  c", "队列内下移 / 上移 · 清空待播"],
       ]},
       { icon: "\uF074", title: "随机 · 循环 · 歌词", items: [
         ["s  ·  m", "随机播放 · 循环模式"],
         ["l / L", "歌词开关 / 全屏 KTV 歌词"],
         ["设置行 4", "歌词延迟 -5~5s (负=提前, 正=滞后)"],
+        [", / ;", "歌词延迟 -0.25s / +0.25s (快捷)"],
         ["自动", "歌词/歌名超宽时行内滚动"],
       ]},
       { icon: "\uF004", title: "收藏 · 歌单", items: [
@@ -571,8 +667,9 @@ export class PlayerUI {
       ]},
       { icon: "\uF013", title: "音量 · 设置", items: [
         ["+ / -  ·  M / 0", "音量增减 / 静音"],
-        ["z  ·  i", "睡眠定时 / 歌曲信息 (格式·时长·次数)"],
-        ["4", "设置: 主题/音量/倍速/歌词延迟/目录/版本"],
+        ["z  ·  i", "睡眠定时 (渐弱暂停) / 歌曲信息"],
+        ["设置 → 音乐目录", "多目录管理: a 添加 · d 删除 · Enter 置顶"],
+        ["4", "设置: 主题/音量/倍速/歌词延迟/排序/目录"],
       ]},
       { icon: "\uF08B", title: "退出", items: [
         ["q / Esc", "退出 / 逐级返回"],
@@ -779,9 +876,170 @@ export class PlayerUI {
     this.confirmOverlay.add(confirmCard)
     root.add(this.confirmOverlay)
 
+    // ── r-1.0 排序菜单 (o) ──
+    this.sortOverlay = new BoxRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: this.theme.crust,
+      visible: false,
+      zIndex: 320,
+    })
+    const sortCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      borderStyle: "double",
+      borderColor: this.theme.lavender,
+      title: " \uF0CA 列表排序 ",
+      titleColor: this.theme.lavender,
+      paddingLeft: 3,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      width: 48,
+    })
+    this.sortRows = []
+    for (let i = 0; i < SORT_MODES.length + 1; i++) {
+      const row = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
+      sortCard.add(row)
+      this.sortRows.push(row)
+    }
+    sortCard.add(
+      new TextRenderable(r, {
+        content: t`${fg(this.theme.overlay)("↑↓ 选择 · ←/→ 切换升降序 · Enter 应用 · Esc 取消")}`,
+        selectable: false,
+        paddingTop: 1,
+      }),
+    )
+    this.sortOverlay.add(sortCard)
+    root.add(this.sortOverlay)
+
+    // ── r-1.0 音乐库统计 (S) ──
+    this.statsOverlay = new BoxRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: this.theme.crust,
+      visible: false,
+      zIndex: 310,
+    })
+    const statsCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      borderStyle: "double",
+      borderColor: this.theme.sky,
+      title: ` \uF080 音乐库统计 · 蓝汐音乐 ${VERSION} `,
+      titleColor: this.theme.sky,
+      paddingLeft: 3,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      width: 74,
+    })
+    this.statsTitle = new TextRenderable(r, { content: "", fg: this.theme.text, selectable: false, wrapMode: "none" })
+    statsCard.add(this.statsTitle)
+    statsCard.add(new TextRenderable(r, { content: "", selectable: false }))
+    this.statsRows = []
+    for (let i = 0; i < 22; i++) {
+      const row = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
+      statsCard.add(row)
+      this.statsRows.push(row)
+    }
+    statsCard.add(
+      new TextRenderable(r, {
+        content: t`${fg(this.theme.pink)(" 按任意键关闭喵~ ")}`,
+        selectable: false,
+        paddingTop: 1,
+      }),
+    )
+    this.statsOverlay.add(statsCard)
+    root.add(this.statsOverlay)
+
+    // ── r-1.0 音乐目录管理 (设置 → 音乐目录 Enter) ──
+    this.dirOverlay = new BoxRenderable(r, {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: this.theme.crust,
+      visible: false,
+      zIndex: 315,
+    })
+    const dirCard = new BoxRenderable(r, {
+      flexDirection: "column",
+      borderStyle: "double",
+      borderColor: this.theme.green,
+      title: " \uF07B 音乐目录管理 ",
+      titleColor: this.theme.green,
+      paddingLeft: 3,
+      paddingRight: 3,
+      paddingTop: 1,
+      paddingBottom: 1,
+      width: 76,
+    })
+    this.dirRows = []
+    for (let i = 0; i < 9; i++) {
+      const row = new TextRenderable(r, { content: "", selectable: false, wrapMode: "none" })
+      dirCard.add(row)
+      this.dirRows.push(row)
+    }
+    this.dirHint = new TextRenderable(r, {
+      content: "",
+      fg: this.theme.subtext,
+      selectable: false,
+      paddingTop: 1,
+      wrapMode: "none",
+    })
+    dirCard.add(this.dirHint)
+    this.dirOverlay.add(dirCard)
+    root.add(this.dirOverlay)
+
+    // ── r-1.0 通知浮层 (底部右侧堆叠) ──
+    // 注意: 不在隐藏的 absolute 盒子里预先创建文本节点 — 那样的节点后续不再渲染。
+    // 改为首次 pushToast 时懒创建 (见 ensureToastBoxes)。
+    this.toastRoot = root
+    this.toastBoxes = []
+
     this.attachDialogEvents()
 
     r.root.add(root)
+  }
+
+  /** 懒创建通知浮层节点: 必须在树已提交渲染后创建 (预建在隐藏 absolute 盒里的文本节点之后不再渲染) */
+  private ensureToastBoxes() {
+    if (this.toastBoxes.length || !this.toastRoot) return
+    for (let i = 0; i < TOAST_MAX; i++) {
+      const box = new BoxRenderable(this.renderer, {
+        position: "absolute",
+        right: 2,
+        bottom: 2 + i * 3,
+        width: 46,
+        height: 3,
+        borderStyle: "single",
+        borderColor: this.theme.lavender,
+        backgroundColor: this.theme.mantle,
+        paddingLeft: 1,
+        paddingRight: 1,
+        visible: false,
+        zIndex: 450,
+      })
+      const text = new TextRenderable(this.renderer, { content: " ", selectable: false, wrapMode: "none" })
+      box.add(text)
+      this.toastRoot.add(box)
+      this.toastBoxes.push({ box, text })
+    }
   }
 
   // =========================================================
@@ -866,6 +1124,36 @@ export class PlayerUI {
     // 歌曲信息弹层: 任意键关闭
     if (this.showInfo) {
       this.closeInfo()
+      key.preventDefault()
+      return
+    }
+    // 统计面板 (r-1.0): 任意键关闭
+    if (this.showStats) {
+      this.closeStats()
+      key.preventDefault()
+      return
+    }
+    // 排序菜单 (r-1.0): ↑↓ 选择 · ←/→ 升降序 · Enter 应用 · Esc 取消
+    if (this.showSort) {
+      if (name === "up" || seq === "k") this.sortCursor = (this.sortCursor - 1 + SORT_MODES.length) % SORT_MODES.length
+      else if (name === "down" || seq === "j") this.sortCursor = (this.sortCursor + 1) % SORT_MODES.length
+      else if (name === "left" || name === "right") p.sortAsc = !p.sortAsc
+      else if (name === "return" || name === "enter") this.applySortMenu()
+      else if (name === "escape" || seq === "q") this.closeSort()
+      this.updateSortMenu()
+      key.preventDefault()
+      return
+    }
+    // 音乐目录管理 (r-1.0)
+    if (this.showDirManager) {
+      if (name === "up" || seq === "k") this.dirCursor = Math.max(0, this.dirCursor - 1)
+      else if (name === "down" || seq === "j") {
+        this.dirCursor = Math.min(Math.max(0, this.dirList().length - 1), this.dirCursor + 1)
+      } else if (name === "return" || name === "enter") this.dirSetPrimary()
+      else if (seq === "a") this.openPlDialog("add-dir")
+      else if (seq === "d" || name === "delete") this.dirRemove()
+      else if (name === "escape" || seq === "q") this.closeDirManager()
+      if (this.showDirManager) this.updateDirManager()
       key.preventDefault()
       return
     }
@@ -1022,6 +1310,46 @@ export class PlayerUI {
       }
     }
 
+    // 队列视图 (view==="queue") 的特有按键 (r-1.0)
+    if (this.view === "queue") {
+      if (name === "escape") {
+        this.setView("list")
+        key.preventDefault()
+        return
+      }
+      if (name === "return" || name === "enter") {
+        this.queuePlaySel()
+        key.preventDefault()
+        return
+      }
+      if (seq === "x" || name === "delete") {
+        this.queueRemoveSel()
+        key.preventDefault()
+        return
+      }
+      if (seq === "J") {
+        this.queueMoveSel(1)
+        key.preventDefault()
+        return
+      }
+      if (seq === "K") {
+        this.queueMoveSel(-1)
+        key.preventDefault()
+        return
+      }
+      if (seq === "c") {
+        this.queueClearAll()
+        key.preventDefault()
+        return
+      }
+      if (seq === "w") {
+        this.queueNextSel()
+        key.preventDefault()
+        return
+      }
+      // 其它键落入下方 switch (s/m/音量/视图切换等)
+    }
+
     // ---- 正常模式 ----
     switch (true) {
       case name === "left":
@@ -1058,6 +1386,30 @@ export class PlayerUI {
         break
       case seq === ".":
         p.advance(1).then(() => this.afterTrackChange())
+        break
+      case seq === ",":
+        p.setLyricDelay(p.lyricDelay - 0.25)
+        saveConfig({ lyric_delay: p.lyricDelay })
+        this.flash(`歌词延迟 ${p.lyricDelay.toFixed(2)}s (已保存)`)
+        break
+      case seq === ";":
+        p.setLyricDelay(p.lyricDelay + 0.25)
+        saveConfig({ lyric_delay: p.lyricDelay })
+        this.flash(`歌词延迟 ${p.lyricDelay.toFixed(2)}s (已保存)`)
+        break
+      case seq === "o":
+        this.openSort()
+        key.preventDefault()
+        break
+      case seq === "S":
+        this.openStats()
+        key.preventDefault()
+        break
+      case seq === "w":
+        this.queueNextSelected()
+        break
+      case seq === "e":
+        this.queueAppendSelected()
         break
       case seq === "s":
         p.toggleShuffle()
@@ -1113,6 +1465,10 @@ export class PlayerUI {
         this.setView("settings")
         key.preventDefault()
         break
+      case seq === "5":
+        this.setView("queue")
+        key.preventDefault()
+        break
       case seq === "P":
         this.setView("pl")
         key.preventDefault()
@@ -1159,8 +1515,8 @@ export class PlayerUI {
   //  视图切换 (tab)
   // =========================================================
 
-  /** 切换列表区视图: list / fav / pl / settings */
-  setView(v: "list" | "fav" | "pl" | "settings") {
+  /** 切换列表区视图: list / fav / pl / settings / queue */
+  setView(v: ViewName) {
     if (this.view === v) {
       // 再按一次歌单 tab: 若在详情则返回列表
       if (v === "pl" && this.plLevel === "detail") this.closePlDetail()
@@ -1170,6 +1526,7 @@ export class PlayerUI {
     // 离开前保存各视图游标
     if (this.view === "list") this.savedListSel = this.sel
     else if (this.view === "fav") this.savedFavSel = this.sel
+    else if (this.view === "queue") this.savedQueueSel = this.sel
     // 从歌单离开: 若在详情/选歌, 先回列表级
     if (this.view === "pl") {
       this.plPickerMode = false
@@ -1191,6 +1548,8 @@ export class PlayerUI {
         this.sel = 0
       } else if (v === "settings") {
         this.sel = 0
+      } else if (v === "queue") {
+        this.sel = Math.max(0, Math.min(Math.max(0, p.queue.length - 1), this.savedQueueSel))
       } else {
         this.sel = Math.max(0, Math.min(Math.max(0, p.playlist.length - 1), this.savedListSel))
       }
@@ -1198,8 +1557,19 @@ export class PlayerUI {
     this.view = v
     this.searchActive = false
     this.searchQuery = ""
+    this.beginViewTransition()
     this.updateTabBar()
     this.updatePlaylist()
+  }
+
+  // =========================================================
+  //  视图过渡 / 选择高亮 (r-1.0 动效)
+  // =========================================================
+
+  /** 启动一次视图切换过渡 (列表边框扫光 + 指示条滑动) */
+  private beginViewTransition() {
+    this.viewAnimT = 0
+    if (!this.animTimer) this.viewAnimT = 1
   }
 
   /** 刷新 tab 栏: 记录目标态并重绘 (动效循环未启动时直接到位) */
@@ -1237,6 +1607,15 @@ export class PlayerUI {
   flash(text: string, seconds = 1.6) {
     this.msg = text
     this.msgUntil = Date.now() + seconds * 1000
+    // r-1.0: 同时推一条通知浮层 (按内容猜一个强调色; 动效循环未启动时不显示)
+    const color = /\uF1F8|失败|错误|取消/.test(text)
+      ? this.theme.red
+      : /\uF004|\uF055|\uF067|已收藏|已添加|已创建/.test(text)
+        ? this.theme.green
+        : /\uF0CA|队列|排序|插队/.test(text)
+          ? this.theme.lavender
+          : this.theme.sky
+    this.pushToast(text, color)
   }
 
   /** 睡眠定时器切换后的提示 (含刷新设置行显示) */
@@ -1249,7 +1628,8 @@ export class PlayerUI {
   /** 当前视图的行数 */
   private listCount(): number {
     const p = this.p
-    if (this.view === "settings") return 8
+    if (this.view === "settings") return SETTING_ROW_COUNT
+    if (this.view === "queue") return p.queue.length
     if (this.view === "pl") {
       if (this.plLevel === "list") return p.playlists.length
       // detail: plCurrent 的歌曲; picker: 全库
@@ -1300,6 +1680,7 @@ export class PlayerUI {
   }
 
   afterTrackChange() {
+    this.refreshSpectrumSeed()
     this.updateNowPlaying()
     this.updatePlaylist()
   }
@@ -1401,26 +1782,27 @@ export class PlayerUI {
 
   // ---------- 设置视图 ----------
 
-  /** 设置项 Enter: 0 主题 / 3 歌词延迟 / 4 睡眠 / 5 改目录 / 6 缓存清空 / 7 版本只读 */
+  /** 设置项 Enter: 0 主题 / 3 歌词延迟 / 4 睡眠 / 5 目录管理 / 6 排序菜单 / 7 缓存 / 8 版本 */
   settingEnter() {
     if (this.sel === 0) this.cycleTheme()
-    else if (this.sel === 3) this.flash("用 ←/→ 调整歌词延迟喵~ (-5~5s, 步进 0.25, 正=滞后/负=提前, 自动保存)")
+    else if (this.sel === 3) this.flash("用 ←/→ 或 , ; 调整歌词延迟喵~ (-5~5s, 步进 0.25, 正=滞后/负=提前, 自动保存)")
     else if (this.sel === 4) {
       this.p.cycleSleep()
       this.flashSleep()
-    } else if (this.sel === 5) this.openPlDialog("set-dir", this.p.musicDir)
-    else if (this.sel === 6) {
+    } else if (this.sel === 5) this.openDirManager()
+    else if (this.sel === 6) this.openSort()
+    else if (this.sel === 7) {
       const n = clearCache()
       ensureCacheDir()
       this.flash(`已清空缓存 (${n} 项) 喵~`, 2.2)
       this.updatePlaylist()
     }
-    else if (this.sel === 7) this.flash(`当前版本 ${VERSION} 喵~`)
+    else if (this.sel === 8) this.flash(`当前版本 ${VERSION} 喵~`)
     else if (this.sel === 2) this.flash("用 ←/→ 调整倍速喵~ (步进 0.25, 自动保存)")
     else this.flash("用 ←/→ 或 +/- 调整音量喵~ (自动保存)")
   }
 
-  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5, 倍速=∓0.25, 歌词延迟=∓0.25 (持久化) */
+  /** 设置项 ←/→: 主题=前/后切换, 音量=∓5, 倍速=∓0.25, 歌词延迟=∓0.25, 排序=切换字段 (均持久化) */
   settingAdjust(dir: number) {
     const p = this.p
     if (this.sel === 0) {
@@ -1449,29 +1831,126 @@ export class PlayerUI {
     } else if (this.sel === 4) {
       this.p.cycleSleep(dir)
       this.flashSleep()
-    } else if (this.sel === 6) this.flash("Enter 清空缓存喵~")
-    else if (this.sel === 7) this.flash("版本是只读的喵~ h 帮助查看更多")
+    } else if (this.sel === 5) this.flash("Enter 管理音乐目录喵~ (a 添加 · d 删除 · Enter 置顶)")
+    else if (this.sel === 6) {
+      const cur = SORT_MODES.indexOf(p.sortMode)
+      const n = SORT_MODES.length
+      const next = SORT_MODES[((cur + dir) % n + n) % n]
+      p.setSort(next, p.sortAsc)
+      saveConfig({ sort_mode: next, sort_asc: p.sortAsc })
+      this.sel = Math.max(0, Math.min(this.listCount() - 1, this.sel))
+      this.updatePlaylist()
+      this.flash(`排序: ${SORT_LABEL[next]} ${p.sortAsc ? "↑" : "↓"} (已保存) Enter 打开菜单`)
+    } else if (this.sel === 7) this.flash("Enter 清空缓存喵~")
+    else if (this.sel === 8) this.flash("版本是只读的喵~ h 帮助查看更多")
   }
 
   /** 改音乐目录: 校验 + 持久化 + 重扫 */
-  applyMusicDir(dir: string) {
+  applyMusicDirs(dirs: string[]): boolean {
     const p = this.p
-    let abs = dir
-    try {
-      abs = resolve(dir)
-    } catch {
-      /* ignore */
+    const clean: string[] = []
+    for (const d of dirs) {
+      let abs = d
+      try {
+        abs = resolve(d)
+      } catch {
+        abs = d
+      }
+      if (!abs || clean.includes(abs)) continue
+      if (!existsSync(abs)) {
+        this.flash(`目录不存在喵~: ${d}`)
+        continue
+      }
+      clean.push(abs)
     }
-    if (!existsSync(abs)) {
-      this.flash(`目录不存在喵~: ${dir}`)
+    if (!clean.length) {
+      this.flash("至少要保留一个有效目录喵~")
+      return false
+    }
+    saveMusicDirs(clean)
+    p.musicDirs = clean
+    p.musicDir = clean[0]
+    p.refreshDir().then((n) => {
+      this.sel = Math.max(0, Math.min(Math.max(0, this.listCount() - 1), p.idx))
+      this.updatePlaylist()
+      this.updateDirManager()
+      this.flash(`\uF07C 音乐目录已更新 (${clean.length} 个, ${n} 首)`, 2.5)
+    })
+    return true
+  }
+
+  // ---------- r-1.0: 音乐目录管理弹层 ----------
+
+  /** 当前目录列表 (有效主列表) */
+  private dirList(): string[] {
+    return this.p.scanRoots()
+  }
+
+  private openDirManager() {
+    this.showDirManager = true
+    this.dirCursor = 0
+    this.dirOverlay.visible = true
+    this.updateDirManager()
+  }
+
+  private closeDirManager() {
+    this.showDirManager = false
+    this.dirOverlay.visible = false
+    this.updatePlaylist()
+  }
+
+  /** 重画目录管理弹层 (列表 + 高亮 + 提示) */
+  updateDirManager() {
+    if (!this.dirOverlay) return
+    const dirs = this.dirList()
+    if (this.dirCursor >= dirs.length) this.dirCursor = Math.max(0, dirs.length - 1)
+    for (let i = 0; i < this.dirRows.length; i++) {
+      const row = this.dirRows[i]
+      const d = dirs[i]
+      if (!d) {
+        row.content = ""
+        continue
+      }
+      const sel = i === this.dirCursor
+      const label = `${sel ? "▌ " : "  "}${i === 0 ? "\uF005 主 " : "   "}${clipWidth(d, 60)}`
+      row.content = sel
+        ? t`${bold(fg(this.theme.green)(label))}`
+        : t`${fg(i === 0 ? this.theme.sky : this.theme.text)(label)}`
+    }
+    this.dirHint.content = ` 共 ${dirs.length} 个目录 (全部合并扫描) · a 添加 · d 删除 · Enter 设为主目录 · Esc 关闭`
+  }
+
+  /** Enter: 把选中目录置顶为主目录 */
+  private dirSetPrimary() {
+    const dirs = this.dirList()
+    const d = dirs[this.dirCursor]
+    if (!d) return
+    if (this.dirCursor === 0) {
+      this.flash("已经在主目录位置啦喵~")
       return
     }
-    saveConfig({ music_directory: abs })
-    p.musicDir = abs
-    p.refreshDir().then((n) => {
-      this.sel = p.idx
-      this.updatePlaylist()
-      this.flash(`\uF07C 已切换音乐目录: ${abs} (${n} 首)`, 2.5)
+    const next = [d, ...dirs.filter((x) => x !== d)]
+    this.dirCursor = 0
+    if (this.applyMusicDirs(next)) this.flash(`\uF005 主目录: ${d}`, 2)
+  }
+
+  /** d: 删除选中目录 (不删磁盘文件) */
+  private dirRemove() {
+    const dirs = this.dirList()
+    if (dirs.length <= 1) {
+      this.flash("至少要保留一个目录喵~")
+      return
+    }
+    const d = dirs[this.dirCursor]
+    if (!d) return
+    this.askConfirm(`\uF1F8 从音乐目录移除「${clipWidth(d, 46)}」? (不删磁盘文件)`, () => {
+      const next = dirs.filter((x) => x !== d)
+      if (this.applyMusicDirs(next)) {
+        this.dirCursor = Math.max(0, Math.min(next.length - 1, this.dirCursor))
+        this.updateDirManager()
+        this.dirOverlay.visible = true
+        this.flash(`已移除目录: ${d}`, 2)
+      }
     })
   }
 
@@ -1584,6 +2063,12 @@ export class PlayerUI {
     const confirmMsg = this.confirmMessage
     const confirmAct = this.confirmAction
     const pendingSong = this.pendingSongPath
+    // r-1.0: 新弹层/面板状态也必须跨重建存活 (applyTheme 备份/恢复清单)
+    const showSort = this.showSort
+    const sortCursor = this.sortCursor
+    const showStats = this.showStats
+    const showDirManager = this.showDirManager
+    const dirCursor = this.dirCursor
 
     for (const ch of this.renderer.root.getChildren()) {
       ch.destroyRecursively()
@@ -1620,6 +2105,23 @@ export class PlayerUI {
     this.sel = sel
     this.pendingSongPath = pendingSong
     if (confirmAct) this.askConfirm(confirmMsg, confirmAct)
+    this.showSort = showSort
+    this.sortCursor = sortCursor
+    this.showStats = showStats
+    this.showDirManager = showDirManager
+    this.dirCursor = dirCursor
+    if (showSort) {
+      this.sortOverlay.visible = true
+      this.updateSortMenu()
+    }
+    if (showStats) {
+      this.statsOverlay.visible = true
+      this.updateStats()
+    }
+    if (showDirManager) {
+      this.dirOverlay.visible = true
+      this.updateDirManager()
+    }
     this.lastPlTitle = "" // 标题节点已重建, 缓存作废, 让 tick 重写
     this.updateTabBar()
     this.updatePlaylist()
@@ -1659,12 +2161,12 @@ export class PlayerUI {
     this.updatePlaylist()
   }
 
-  /** 弹出输入弹层: 新建/重命名歌单 · 重命名歌曲 · 修改音乐目录 */
-  openPlDialog(mode: "new" | "rename" | "rename-song" | "set-dir", preset = "") {
+  /** 弹出输入弹层: 新建/重命名歌单 · 重命名歌曲 · 添加音乐目录 */
+  openPlDialog(mode: "new" | "rename" | "rename-song" | "set-dir" | "add-dir", preset = "") {
     this.plDialogMode = mode
     this.plDialogValue = preset
     this.plDialogInput.value = preset
-    this.plDialogInput.width = mode === "set-dir" ? 70 : mode === "rename-song" ? 50 : 40
+    this.plDialogInput.width = mode === "set-dir" || mode === "add-dir" ? 70 : mode === "rename-song" ? 50 : 40
     this.plDialogTitle.content =
       mode === "new"
         ? t`${bold(fg(this.theme.sky)(" \uF067 新建歌单 "))}`
@@ -1672,7 +2174,9 @@ export class PlayerUI {
           ? t`${bold(fg(this.theme.sky)(" \uF044 重命名歌单 "))}`
           : mode === "rename-song"
             ? t`${bold(fg(this.theme.sky)(" \uF044 重命名歌曲 "))}`
-            : t`${bold(fg(this.theme.sky)(" \uF07B 修改音乐目录 "))}`
+            : mode === "add-dir"
+              ? t`${bold(fg(this.theme.sky)(" \uF067 添加音乐目录 "))}`
+              : t`${bold(fg(this.theme.sky)(" \uF07B 修改音乐目录 "))}`
     const songExt = this.pendingSongPath ? extOf(this.pendingSongPath) : ""
     this.plDialogHint.content =
       mode === "new"
@@ -1681,13 +2185,15 @@ export class PlayerUI {
           ? `原名: ${preset}  ·  Enter 确认 · Esc 取消`
           : mode === "rename-song"
             ? `原名: ${preset}${songExt}  ·  只输入歌名, 后缀 ${songExt} 保留 · Enter 确认 · Esc 取消`
-            : `当前: ${preset}  ·  输入完整路径 · Enter 确认重扫 · Esc 取消`
+            : mode === "add-dir"
+              ? `输入完整路径 (支持 ~) · Enter 添加到目录列表 · Esc 取消`
+              : `当前: ${preset}  ·  输入完整路径 · Enter 确认重扫 · Esc 取消`
     this.plDialogOverlay.visible = true
     this.plDialogInput.focus()
   }
 
   closePlDialog() {
-    const wasDir = this.plDialogMode === "set-dir"
+    const wasDir = this.plDialogMode === "set-dir" || this.plDialogMode === "add-dir"
     this.plDialogMode = null
     this.plDialogValue = ""
     this.pendingSongPath = null
@@ -1696,6 +2202,11 @@ export class PlayerUI {
     this.plDialogOverlay.visible = false
     this.plDialogInput.blur()
     if (wasDir && this.view === "settings") this.updatePlaylist()
+    // 从目录管理里打开的添加弹层: 关闭后回到目录弹层
+    if (wasDir && this.showDirManager) {
+      this.dirOverlay.visible = true
+      this.updateDirManager()
+    }
   }
 
   commitPlDialog(value: string) {
@@ -1703,7 +2214,17 @@ export class PlayerUI {
     const mode = this.plDialogMode
     if (mode === "set-dir") {
       this.closePlDialog()
-      if (v) this.applyMusicDir(v)
+      if (v) this.applyMusicDirs([...this.dirList(), v])
+      return
+    }
+    if (mode === "add-dir") {
+      this.closePlDialog()
+      if (!v) return
+      if (this.applyMusicDirs([...this.dirList(), v])) {
+        this.dirCursor = Math.max(0, this.dirList().length - 1)
+        this.flash(`\uF067 已添加目录: ${v}`, 2)
+        this.updateDirManager()
+      }
       return
     }
     if (mode === "rename-song") {
@@ -1883,6 +2404,399 @@ export class PlayerUI {
   }
 
   // =========================================================
+  //  r-1.0 播放队列动作
+  // =========================================================
+
+  /** 当前选中行的真实 playlist 下标 (无则 null) */
+  private selectedPlaylistIndex(): number | null {
+    const path = this.selectedSongPath()
+    if (!path) return null
+    const i = this.p.playlist.indexOf(path)
+    return i >= 0 ? i : null
+  }
+
+  /** w: 选中曲插队到当前曲之后 (列表/收藏/歌单/选歌 通用) */
+  private queueNextSelected() {
+    const i = this.selectedPlaylistIndex()
+    if (i === null) {
+      this.flash("这里没有可插队的歌曲喵~")
+      return
+    }
+    this.p.queueInsertNext(i)
+    const name = titleOf(this.p.playlist[i])
+    this.flash(`\uF0CA 下一首播放: ${name}`, 2)
+    this.updatePlaylist()
+  }
+
+  /** e: 选中曲加入队列末尾 */
+  private queueAppendSelected() {
+    const i = this.selectedPlaylistIndex()
+    if (i === null) {
+      this.flash("这里没有可加队的歌曲喵~")
+      return
+    }
+    this.p.queueAppend(i)
+    const name = titleOf(this.p.playlist[i])
+    this.flash(`\uF0CA 已加入队列: ${name}`, 2)
+    this.updatePlaylist()
+  }
+
+  /** 队列视图 Enter: 播放选中项 */
+  private queuePlaySel() {
+    const p = this.p
+    const real = p.queue[this.sel]
+    if (real === undefined || real < 0 || real >= p.playlist.length) return
+    p.playIndex(real).then(() => {
+      this.afterTrackChange()
+      this.updatePlaylist()
+    })
+  }
+
+  /** 队列视图 x: 从队列移除选中项 (不改播放) */
+  private queueRemoveSel() {
+    const p = this.p
+    const removed = p.queueRemoveAt(this.sel)
+    if (removed === null) return
+    const name = p.playlist[removed] ? titleOf(p.playlist[removed]) : "?"
+    this.flash(`已从队列移除: ${name}`, 1.6)
+    // 检测: 队列被清空时立即用整库重建, 否则 n/p 与播完续播都会失效
+    if (!p.queue.length && p.ensureQueue()) {
+      this.sel = Math.max(0, Math.min(p.queue.length - 1, p.queue.indexOf(p.idx)))
+      this.flash("队列已空 → 已恢复整库顺序喵~", 2)
+    } else {
+      this.sel = Math.max(0, Math.min(Math.max(0, p.queue.length - 1), this.sel))
+    }
+    this.updatePlaylist()
+  }
+
+  /** 队列视图 J/K: 下移/上移选中项 */
+  private queueMoveSel(delta: number) {
+    this.sel = this.p.queueMove(this.sel, delta)
+    this.updatePlaylist()
+  }
+
+  /** 队列视图 c: 清空待播 */
+  private queueClearAll() {
+    const n = this.p.queueClear()
+    this.sel = 0
+    this.flash(`\uF0CA 队列已清空 (剩 ${n} 首)`, 1.8)
+    this.updatePlaylist()
+  }
+
+  /** 队列视图 w: 选中项移动到当前曲之后 */
+  private queueNextSel() {
+    const p = this.p
+    const real = p.queue[this.sel]
+    if (real === undefined) return
+    p.queueInsertNext(real)
+    this.sel = Math.max(0, p.queue.indexOf(real))
+    this.flash(`\uF0CA 下一首播放: ${titleOf(p.playlist[real])}`, 1.8)
+    this.updatePlaylist()
+  }
+
+  // =========================================================
+  //  r-1.0 排序菜单
+  // =========================================================
+
+  private openSort() {
+    this.showSort = true
+    this.sortCursor = Math.max(0, SORT_MODES.indexOf(this.p.sortMode))
+    this.sortOverlay.visible = true
+    this.updateSortMenu()
+  }
+
+  private closeSort() {
+    this.showSort = false
+    this.sortOverlay.visible = false
+    this.updatePlaylist()
+  }
+
+  private applySortMenu() {
+    const mode = SORT_MODES[this.sortCursor]
+    this.p.setSort(mode, this.p.sortAsc)
+    saveConfig({ sort_mode: mode, sort_asc: this.p.sortAsc })
+    this.closeSort()
+    this.flash(`\uF0CA 排序: ${SORT_LABEL[mode]} ${this.p.sortAsc ? "↑" : "↓"} (已保存)`, 2.2)
+  }
+
+  /** 重画排序菜单 (字段列表 + 升降序行 + 高亮) */
+  updateSortMenu() {
+    if (!this.sortOverlay) return
+    for (let i = 0; i < this.sortRows.length; i++) {
+      const row = this.sortRows[i]
+      if (i === SORT_MODES.length) {
+        const label = `${this.p.sortAsc ? "↑ 升序" : "↓ 降序"}  (←/→ 切换)`
+        row.content = t`${fg(this.theme.subtext)(label)}`
+        continue
+      }
+      const mode = SORT_MODES[i]
+      const sel = i === this.sortCursor
+      const active = mode === this.p.sortMode
+      const label = `${sel ? "▌ " : "  "}${SORT_LABEL[mode]}${active ? "  \uF00C" : ""}`
+      row.content = sel
+        ? t`${bold(fg(this.theme.sky)(label))}`
+        : t`${fg(active ? this.theme.green : this.theme.text)(label)}`
+    }
+  }
+
+  // =========================================================
+  //  r-1.0 音乐库统计面板
+  // =========================================================
+
+  private openStats() {
+    this.showStats = true
+    this.statsOverlay.visible = true
+    this.updateStats()
+  }
+
+  private closeStats() {
+    this.showStats = false
+    this.statsOverlay.visible = false
+  }
+
+  /** 画一根渐变条形 (value/max 比例 × width 列) */
+  private statBar(value: number, max: number, width: number, pal: string[], flow = 0): TextChunk[] {
+    const w = max > 0 ? Math.max(value > 0 ? 1 : 0, Math.round((value / max) * width)) : 0
+    const parts: TextChunk[] = []
+    for (let i = 0; i < w; i++) {
+      parts.push(fg(paletteAt(pal, i / Math.max(1, w - 1) * 0.8 + flow))(BLOCK_CHARS[BLOCK_CHARS.length - 1]))
+    }
+    return parts
+  }
+
+  /** 重画统计面板 (真实数据: 曲库/格式分布/播放 Top/最近播放) */
+  updateStats() {
+    if (!this.statsOverlay) return
+    const s = computeStats(this.p)
+    this.statsTitle.content = t`${fg(this.theme.subtext)(" 曲目 ")}${bold(fg(this.theme.sky)(String(s.tracks)))}${fg(this.theme.subtext)("  总时长 ")}${bold(fg(this.theme.lavender)(fmtDuration(s.knownDurSec)))}${fg(this.theme.overlay)(`(${s.knownDurCount} 首已探测)`)}${fg(this.theme.subtext)("  播放 ")}${bold(fg(this.theme.pink)(String(s.totalPlays)))}${fg(this.theme.subtext)(" 次")}`
+
+    const lines: Array<StyledText | null> = []
+    const summary = t`${fg(this.theme.overlay)(" ")}${fg(this.theme.yellow)("\uF004")}${fg(this.theme.text)(` ${s.favorites} 收藏`)}${fg(this.theme.overlay)("   ·   ")}${fg(this.theme.green)("\uF1C5")}${fg(this.theme.text)(` ${s.playlists} 歌单`)}${fg(this.theme.overlay)("   ·   ")}${fg(this.theme.sky)("\uF07B")}${fg(this.theme.text)(` ${s.dirs} 目录`)}${fg(this.theme.overlay)("   ·   ")}${fg(this.theme.lavender)("\uF001")}${fg(this.theme.text)(` ${s.formats.length} 种格式`)}`
+    lines.push(summary, null)
+
+    lines.push(t`${bold(fg(this.theme.lavender)(" 格式分布"))}`)
+    const fmtMax = Math.max(1, ...s.formats.map((x) => x.value))
+    for (const f of s.formats) {
+      lines.push(
+        new StyledText([
+          ...t`${fg(this.theme.overlay)("  ")}${fg(this.theme.text)(f.label.padEnd(6, " ").slice(0, 6))}${fg(this.theme.overlay)(String(f.value).padStart(3, " ") + " ")}`.chunks,
+          ...this.statBar(f.value, fmtMax, 26, [this.theme.sky, this.theme.lavender]),
+        ]),
+      )
+    }
+    lines.push(null)
+
+    lines.push(t`${bold(fg(this.theme.peach)(" 播放次数 Top"))}${fg(this.theme.overlay)("  (点亮的 ♪ 越多说明你越爱它)")}`)
+    if (!s.topPlays.length) {
+      lines.push(t`${fg(this.theme.overlay)("  (还没有播放记录喵~)")}`)
+    } else {
+      const topMax = Math.max(1, ...s.topPlays.map((x) => x.value))
+      for (const x of s.topPlays) {
+        lines.push(
+          new StyledText([
+            ...t`${fg(this.theme.overlay)("  ")}${fg(this.theme.text)(clipWidth(x.label, 18).padEnd(18, " "))}${fg(this.theme.pink)(String(x.value).padStart(3, " ") + " ")}`.chunks,
+            ...this.statBar(x.value, topMax, 20, [this.theme.pink, this.theme.peach]),
+          ]),
+        )
+      }
+    }
+    lines.push(null)
+
+    lines.push(t`${bold(fg(this.theme.sky)(" 最近播放"))}`)
+    if (!s.recent.length) {
+      lines.push(t`${fg(this.theme.overlay)("  (还没有最近播放记录)")}`)
+    } else {
+      const now = Date.now()
+      for (const x of s.recent) {
+        lines.push(
+          t`${fg(this.theme.overlay)("  \uF017 ")}${fg(this.theme.text)(clipWidth(x.label, 26).padEnd(26, " "))}${fg(this.theme.subtext)(fmtAgo(x.value, now))}`,
+        )
+      }
+    }
+
+    for (let i = 0; i < this.statsRows.length; i++) {
+      const l = lines[i]
+      this.statsRows[i].content = l ?? ""
+    }
+  }
+
+  // =========================================================
+  //  r-1.0 通知浮层 (toast)
+  // =========================================================
+
+  /** 推一条通知浮层 (仅动效循环运行时显示; 测试/静态场景只走状态栏 flash) */
+  private pushToast(text: string, color: string) {
+    if (!this.animTimer) return
+    this.ensureToastBoxes()
+    this.toasts.push({ id: ++this.toastSeq, text, color, at: Date.now() })
+    while (this.toasts.length > TOAST_MAX) this.toasts.shift()
+  }
+
+  /** 每帧重画通知浮层 (右侧滑入 + 淡出) */
+  private updateToasts() {
+    if (!this.animTimer) {
+      for (const tb of this.toastBoxes) tb.box.visible = false
+      return
+    }
+    if (this.toasts.length && !this.toastBoxes.length) this.ensureToastBoxes()
+    if (!this.toastBoxes.length) return
+    const now = Date.now()
+    this.toasts = this.toasts.filter((t) => now - t.at < TOAST_MS)
+    for (let i = 0; i < this.toastBoxes.length; i++) {
+      const tb = this.toastBoxes[i]
+      // 最新的一条在最下 (i=0)
+      const item = this.toasts[this.toasts.length - 1 - i]
+      if (!item) {
+        tb.box.visible = false
+        continue
+      }
+      const age = now - item.at
+      const enter = Math.min(1, age / 170)
+      const ease = 1 - (1 - enter) * (1 - enter)
+      const fade = Math.min(1, Math.max(0, (TOAST_MS - age) / 280))
+      tb.box.visible = true
+      tb.box.opacity = Math.max(0, Math.min(1, fade * ease))
+      tb.box.right = Math.round(2 + (1 - ease) * 12)
+      tb.box.borderColor = item.color
+      tb.text.content = t`${fg(item.color)("\uF0A1 ")}${fg(this.theme.text)(clipWidth(item.text, 40))}`
+    }
+  }
+
+  // =========================================================
+  //  r-1.0 装饰动效 (每帧)
+  // =========================================================
+
+  /** 顶栏 logo: 渐变流动 + 高光扫过 */
+  private updateLogo() {
+    if (!this.logoText) return
+    const chars = [..."\uF025 蓝汐音乐"]
+    const pal = [this.theme.sky, this.theme.lavender, this.theme.pink, this.theme.peach, this.theme.yellow, this.theme.green]
+    const now = Date.now()
+    const flow = (now / 1000) * 0.14
+    const sweep = (((now / 1000) * 0.5) % 1.7) - 0.35
+    const parts: TextChunk[] = chars.map((ch, i) => {
+      const u = i / Math.max(1, chars.length - 1)
+      let col = paletteAt(pal, u * 0.7 + flow)
+      const d = Math.abs(u - sweep)
+      if (d < 0.22) col = mixHex(col, this.theme.white, (1 - d / 0.22) * 0.7)
+      return bold(fg(col)(ch))
+    })
+    this.logoText.content = new StyledText(parts)
+  }
+
+  /** 程序化频谱可视化 (非真实 FFT, 无 cava 依赖): 对称条形 + 峰值闪光 */
+  private updateSpectrum() {
+    if (!this.spectrumText) return
+    const p = this.p
+    if (p.currentPath !== this.spectrumSeedPath) this.refreshSpectrumSeed()
+    const W = typeof this.spectrumText.width === "number" && this.spectrumText.width > 8 ? this.spectrumText.width : 48
+    const cols = Math.max(8, Math.min(56, W - 1))
+    if (this.spectrumPeaks.length !== cols) this.spectrumPeaks = new Array(cols).fill(0)
+    const now = Date.now() / 1000
+    const playing = p.playing && !p.paused
+    const energy = playing
+      ? 0.5 + 0.5 * Math.abs(Math.sin(now * 1.55 + this.spectrumSeed))
+      : p.playing
+        ? 0.18
+        : 0.06
+    const pal = [this.theme.sky, this.theme.lavender, this.theme.pink, this.theme.peach]
+    const half = Math.max(4, Math.floor(cols / 2))
+    const parts: TextChunk[] = []
+    const s = this.spectrumSeed
+    for (let i = 0; i < cols; i++) {
+      const x = i < half ? i : cols - 1 - i
+      const lowBias = 1 - (x / half) * 0.5
+      const raw =
+        Math.sin(now * 3.1 + x * 0.52 + s) * 0.5 +
+        Math.sin(now * 5.9 + x * 1.31 + s * 2.3) * 0.32 +
+        Math.sin(now * 1.27 + x * 0.17 + s * 0.7) * 0.18
+      const level = Math.max(0, Math.min(1, Math.abs(raw) * lowBias * energy * 1.7))
+      const idx = Math.round(level * (BLOCK_CHARS.length - 1))
+      const pk = Math.max(this.spectrumPeaks[i] - 0.014, level)
+      this.spectrumPeaks[i] = pk
+      let col = paletteAt(pal, x / half * 0.8 + now * 0.04)
+      if (level > pk - 0.07) col = mixHex(col, this.theme.white, 0.5)
+      parts.push(fg(col)(BLOCK_CHARS[idx]))
+    }
+    this.spectrumText.content = new StyledText(parts)
+  }
+
+  /** 换歌时重置频谱种子 (波形换样) */
+  private refreshSpectrumSeed() {
+    const path = this.p.currentPath ?? ""
+    this.spectrumSeedPath = this.p.currentPath
+    let h = 2166136261
+    for (let i = 0; i < path.length; i++) {
+      h ^= path.charCodeAt(i)
+      h = Math.imul(h, 16777619)
+    }
+    this.spectrumSeed = ((h >>> 0) % 1000) / 1000
+  }
+
+  /** tab 激活指示条: 在 tab 之间平滑滑动, 渐变流动 + 两端淡出 */
+  private updateTabIndicator() {
+    if (!this.tabIndicator || !this.tabIndBox) return
+    const target = TAB_KEYS.indexOf(this.view)
+    if (this.animTimer) this.tabIndicatorPos += (target - this.tabIndicatorPos) * 0.24
+    else this.tabIndicatorPos = target
+    if (Math.abs(this.tabIndicatorPos - target) < 0.01) this.tabIndicatorPos = target
+    const i0 = Math.max(0, Math.min(TAB_KEYS.length - 1, Math.floor(this.tabIndicatorPos)))
+    const i1 = Math.min(TAB_KEYS.length - 1, i0 + 1)
+    const f = this.tabIndicatorPos - i0
+    const a = this.tabBtns[i0]
+    const b = this.tabBtns[i1] ?? a
+    const num = (v: unknown, dflt: number) => (typeof v === "number" && Number.isFinite(v) ? v : dflt)
+    const ax = num(a?.screenX, 1)
+    const aw = Math.max(1, num(a?.width, 10))
+    const bx = num(b?.screenX, ax)
+    const bw = Math.max(1, num(b?.width, aw))
+    const x = ax + (bx - ax) * f
+    const w = Math.max(1, Math.round(aw + (bw - aw) * f))
+    const boxX = num(this.tabIndBox?.screenX, x)
+    this.tabIndicator.left = Math.max(0, Math.round(x - boxX))
+    const pal = RAINBOW_KEYS.map((k) => this.theme[k])
+    const flow = (Date.now() / 1000) * 0.22
+    const parts: TextChunk[] = []
+    for (let i = 0; i < w; i++) {
+      let col = paletteAt(pal, (i / Math.max(1, w - 1)) * 1.1 + flow)
+      const edge = Math.min(i, w - 1 - i) / Math.max(1, (w - 1) * 0.3)
+      if (edge < 1) col = mixHex(this.theme.mantle, col, edge)
+      parts.push(fg(col)("▀"))
+    }
+    this.tabIndicator.content = new StyledText(parts)
+  }
+
+  /**
+   * 推进选中行的跑马灯 (tick 10fps 调用)。
+   * 只改选中行的标题文本, 不碰底色 — 底色唯一由 updatePlaylist 写,
+   * 避免两处同时写同一节点导致快速上下切换时闪来闪去。
+   */
+  private advanceMarquee() {
+    const m = this.selMarquee
+    if (!m) return
+    const row = this.plRows[this.sel]
+    if (!row) return
+    const phase = Math.floor((Date.now() - this.marqueeAnchor) / 100)
+    const col =
+      this.sel === this.p.idx
+        ? mixHex(this.theme.green, this.theme.sky, 0.15 + 0.7 * pulse(Date.now(), 2600))
+        : this.theme.text
+    row.text.content = t`${bold(fg(col)(scrollText(m.text, m.width, phase)))}`
+  }
+
+  /** 视图切换过渡: 列表边框扫光 + 指示条滑动 */
+  private updateViewTransition() {
+    if (!this.plBox) return
+    if (this.viewAnimT >= 1) {
+      this.plBox.borderColor = this.theme.surface1
+      return
+    }
+    this.viewAnimT = Math.min(1, this.viewAnimT + 0.085)
+    const e = 1 - Math.pow(1 - this.viewAnimT, 3)
+    this.plBox.borderColor = this.viewAnimT >= 1 ? this.theme.surface1 : mixHex(this.theme.sky, this.theme.surface1, e)
+  }
+
+  // =========================================================
   //  播放列表渲染 (按 view 分发)
   // =========================================================
   private rebuildPlaylistRows(count: number) {
@@ -1904,6 +2818,14 @@ export class PlayerUI {
           this.onRowClick(rowIdx)
         },
       })
+      // r-1.0: 左侧选择指示条 (选中/播放行由 updatePlaylist 上色)
+      const lead = new TextRenderable(this.renderer, {
+        content: " ",
+        selectable: false,
+        width: 1,
+        wrapMode: "none",
+      })
+      box.add(lead)
       // 序号 / 播放标记列 (固定宽度, 右对齐)
       const num = new TextRenderable(this.renderer, { content: "", selectable: false, wrapMode: "none" })
       box.add(num)
@@ -1925,13 +2847,19 @@ export class PlayerUI {
       })
       box.add(meta)
       this.scrollbox.add(box)
-      this.plRows.push({ box, num, text, meta })
+      this.plRows.push({ box, lead, num, text, meta })
     }
   }
 
   /** 行点击: 根据视图行为不同 */
   private onRowClick(i: number) {
     const p = this.p
+    if (this.view === "queue") {
+      this.sel = i
+      this.updatePlaylist()
+      this.queuePlaySel()
+      return
+    }
     if (this.view === "settings") {
       this.sel = i
       this.updatePlaylist()
@@ -1974,17 +2902,33 @@ export class PlayerUI {
       const filled = Math.round((vol / 150) * 20)
       const bar = "█".repeat(filled) + "░".repeat(20 - filled)
       const mute = p.muted ? " \uF026" : ""
+      const dirCount = p.scanRoots().length
+      const dirLabel = dirCount > 1 ? `${dirCount} 个目录 · ${clipWidth(p.musicDir, 70)}` : clipWidth(p.musicDir, 80)
       const rows = [
         `主题        ${THEME_LABEL[this.themeName]}  (${THEME_ORDER.length} 种, ←/→ 或 Enter 切换)`,
         `音量        ${bar} ${vol}${mute}  (←/→ 或 +/- 调整, 自动保存)`,
         `倍速        ${p.speed.toFixed(2)}x  (←/→ 步进 0.25, 0.25x~4x, 自动保存)`,
-        `歌词延迟    ${p.lyricDelay > 0 ? "+" : ""}${p.lyricDelay.toFixed(2)}s  (←/→ 步进 0.25, -5~5s, 正=滞后/负=提前, 自动保存)`,
-        `睡眠定时    ${p.sleepMinutes === 0 ? "关闭" : `${p.sleepMinutes} 分钟`}  (←/→ 或 z 切换, 到点自动暂停)`,
-        `音乐目录    ${clipWidth(p.musicDir, 100)}  (Enter 修改)`,
+        `歌词延迟    ${p.lyricDelay > 0 ? "+" : ""}${p.lyricDelay.toFixed(2)}s  (←/→ 或 , ; 步进 0.25, -5~5s, 自动保存)`,
+        `睡眠定时    ${p.sleepMinutes === 0 ? "关闭" : `${p.sleepMinutes} 分钟`}  (←/→ 或 z 切换, 到点渐弱暂停)`,
+        `音乐目录    ${dirLabel}  (Enter 管理多目录)`,
+        `列表排序    ${SORT_LABEL[p.sortMode]}${p.sortAsc ? " ↑" : " ↓"}  (←/→ 切换字段, Enter 打开菜单, 自动保存)`,
         `缓存目录    ${clipWidth(CACHE_DIR, 90)}  (Enter 查看/清空)`,
         `版本        ${VERSION}  (只读 · 帮助 h 查看更多)`,
       ]
       return { marker: " ", num: "", text: rows[i] || "", meta: "", playing: false }
+    }
+    if (this.view === "queue") {
+      const real = p.queue[i]
+      const path = real !== undefined ? p.playlist[real] : undefined
+      if (path === undefined) return { marker: " ", num: "", text: "", meta: "", playing: false }
+      const isCur = real === p.idx
+      return {
+        marker: isCur ? "\uF04B" : " ",
+        num: idxStr,
+        text: `${titleOf(path)}${isCur ? "  · 正在播放" : ""}`,
+        meta: metaOf(path, p.durationOf(path)),
+        playing: isCur,
+      }
     }
     if (this.view === "pl") {
       if (this.plLevel === "list") {
@@ -2040,6 +2984,14 @@ export class PlayerUI {
     const p = this.p
     const n = this.listCount()
     if (this.plRows.length !== n) this.rebuildPlaylistRows(n)
+    // 选中变化: 重置跑马灯锚点 → 新选中行从第 0 帧平滑开始滚动
+    // (旧实现直接用全局 tickCount 当相位, 快速上下切换时文字会随机跳位, 看起来闪来闪去)
+    if (this.sel !== this.lastMarqueeSel) {
+      this.lastMarqueeSel = this.sel
+      this.marqueeAnchor = Date.now()
+    }
+    const mPhase = Math.floor((Date.now() - this.marqueeAnchor) / 100)
+    this.selMarquee = null
     // 行可用宽度: 布局前未知则用 100 兜底 (滚动/截断自适应)
     const availW = typeof this.scrollbox.width === "number" && this.scrollbox.width > 1 ? this.scrollbox.width : 100
     for (let i = 0; i < n; i++) {
@@ -2048,15 +3000,17 @@ export class PlayerUI {
       const isSel = i === this.sel
       const hasMark = marker.trim() !== ""
       const metaW = displayWidth(meta)
-      const numW2 = displayWidth(num) + (num ? 1 : 0) + (hasMark ? 2 : 0)
+      const numW2 = displayWidth(num) + (num ? 1 : 0) + (hasMark ? 2 : 0) + 1
       const nameW = Math.max(8, availW - metaW - numW2 - 4)
       // 标题超长时滚动 (marquee); 仅选中/播放行滚动, 其余截断
-      const shown = isSel || playing ? scrollText(text, nameW, this.tickCount) : clipWidth(text, nameW)
+      const shown = isSel || playing ? scrollText(text, nameW, mPhase) : clipWidth(text, nameW)
+      if (isSel) this.selMarquee = displayWidth(text) > nameW ? { text, width: nameW } : null
       const box = row.box
       const markStr = hasMark ? `${marker} ` : ""
       const numCol = num ? `${num} ` : ""
       if (isSel) {
         box.backgroundColor = this.theme.surface1
+        row.lead.content = t`${fg(this.theme.sky)("▌")}`
         row.num.content = t`${fg(this.theme.green)(markStr)}${bold(fg(this.theme.sky)(numCol))}`
         row.text.content = t`${bold(fg(this.theme.text)(shown))}`
         row.meta.content = t`${fg(this.theme.text)(meta)}`
@@ -2064,11 +3018,13 @@ export class PlayerUI {
         box.backgroundColor = this.theme.base
         // 播放行: 绿色标识随播放呼吸 (10fps tick 驱动, 周期 2.6s 足够平滑)
         const markCol = mixHex(this.theme.green, this.theme.sky, 0.15 + 0.7 * pulse(Date.now(), 2600))
+        row.lead.content = t`${fg(this.theme.green)("▌")}`
         row.num.content = t`${fg(markCol)(markStr)}${fg(this.theme.overlay)(numCol)}`
         row.text.content = t`${bold(fg(markCol)(shown))}`
         row.meta.content = t`${fg(this.theme.green)(meta)}`
       } else {
         box.backgroundColor = this.theme.base
+        row.lead.content = " "
         row.num.content = t`${fg(this.theme.overlay)(numCol)}`
         row.text.content = t`${fg(this.theme.text)(shown)}`
         row.meta.content = t`${fg(this.theme.overlay)(meta)}`
@@ -2084,6 +3040,11 @@ export class PlayerUI {
   playlistTitle(): string {
     const p = this.p
     if (this.view === "settings") return ` \uF013 设置 · ↑↓ 选择 · Enter/←→ 调整 · Esc 返回 `
+    if (this.view === "queue") {
+      const pos = p.queuePos()
+      const at = pos >= 0 ? `第 ${pos + 1}/${p.queue.length} 位` : `不在队列 (${p.queue.length} 首)`
+      return ` \uF0CA 播放队列 · ${at} · w 插队 · e 加队 · J/K 移动 · x 移除 · c 清空 `
+    }
     if (this.view === "pl") {
       if (this.plPickerMode && this.plCurrent) return ` 加歌 → ${this.plCurrent} · Enter 加入 · Esc 返回 `
       if (this.plLevel === "detail" && this.plCurrent) {
@@ -2109,12 +3070,28 @@ export class PlayerUI {
       this.searchInput.focus()
     }
 
-    // 睡眠定时器到点: 自动暂停
+    // 睡眠定时器到点: 渐弱 7 秒后暂停 (而非突然静音)
     if (p.sleepExpired()) {
-      if (p.playing && !p.paused) p.mpv.pause(true)
-      p.paused = true
-      this.flash("\uF017 睡眠定时器到点啦喵~ 已自动暂停", 3)
+      p.fadeState = null
+      this.sleepFading = true
+      this.sleepFadeFrom = p.volume
+      this.sleepFadeAt = Date.now()
+      this.flash("\uF017 睡眠定时到点啦喵~ 正在渐弱…", 3)
       this.updatePlaylist()
+    }
+    if (this.sleepFading) {
+      const t = Math.min(1, (Date.now() - this.sleepFadeAt) / 7000)
+      const v = Math.round(this.sleepFadeFrom * (1 - t))
+      p.mpv.setProperty("volume", v)
+      p.fadeVol = v
+      if (t >= 1) {
+        p.mpv.pause(true)
+        p.paused = true
+        p.mpv.setProperty("volume", p.volume)
+        p.fadeVol = p.volume
+        this.sleepFading = false
+        this.flash("\uF017 睡眠定时已暂停播放喵~", 3)
+      }
     }
 
     // 布局维护: 歌词区无内容时自动收起 (让列表更大); 列表标题分隔线宽度更新
@@ -2131,14 +3108,23 @@ export class PlayerUI {
       this.plDivider.content = plW > 2 ? new StyledText(parts) : ""
     }
 
-    // 装饰动效 (等化器/彩虹条): 动效循环运行时由 animTick 以 30fps 重画, 这里兜底刷新
+    // 装饰动效 (等化器/彩虹条/频谱/指示条/高亮): 动效循环运行时由 animTick 以 30fps 重画, 这里兜底刷新
+    this.updateLogo()
     this.updateEq()
     this.updateAccent()
+    this.updateSpectrum()
+    this.updateTabIndicator()
+    this.advanceMarquee()
+    this.updateViewTransition()
+    if (this.showStats) this.updateStats()
+    if (this.showSort) this.updateSortMenu()
+    if (this.showDirManager) this.updateDirManager()
     if (this.animTimer) this.syncAnimRate()
 
     // 头部信息: 视图 + 模式
     const mode =
       this.view === "settings" ? "\uF013 设置" :
+      this.view === "queue" ? "\uF0CA 队列" :
       p.isShuffle ? "\uF074 随机" :
       this.searchActive ? "\uF002 搜索" :
       this.view === "fav" ? "\uF004 收藏" :
@@ -2189,7 +3175,8 @@ export class PlayerUI {
       : clipWidth(` 共 ${p.playlist.length} 首 · ${volGlyphStr} `, 60)
 
     // 淡入淡出
-    p.updateFade()
+    // 淡入淡出 (睡眠渐弱期间交给 sleepFading 逻辑, 避免两处同时写 mpv volume)
+    if (!this.sleepFading) p.updateFade()
 
     // duration 兜底
     if (p.playing && p.duration <= 0 && this.tickCount % 10 === 0) {
@@ -2218,7 +3205,7 @@ export class PlayerUI {
     this.animMs = 0
   }
 
-  /** 动效帧率自适应: 播放/全屏歌词 30fps, 待机降频省电 (渐变本身极慢, 看不出差别) */
+  /** 动效帧率自适应: 播放/全屏歌词 30fps, 待机降频省电 */
   private syncAnimRate(force = false) {
     const want = (this.p.playing && !this.p.paused) || this.fullLyrics ? ANIM_FAST_MS : ANIM_IDLE_MS
     if (!force && want === this.animMs) return
@@ -2227,12 +3214,24 @@ export class PlayerUI {
     this.animTimer = setInterval(() => this.animTick(), want)
   }
 
-  /** 一帧动效: 只重画纯装饰, 不碰列表/歌词等 tick 职责 (避免两份真相源互踩) */
+  /**
+   * 一帧动效: 只重画装饰 (LOGO/等化器/彩虹条/频谱/进度条/tab/通知)。
+   * 不碰列表行底色/文本 — 那由 updatePlaylist 独占, 避免两份真相源互踩闪烁。
+   * 跑马灯由 tick 的 advanceMarquee 推进 (10fps 足够顺滑)。
+   */
   private animTick() {
+    this.updateLogo()
     this.updateEq()
     this.updateAccent()
+    this.updateSpectrum()
     this.updateNowPlaying()
     this.stepTabAnim()
+    this.updateTabIndicator()
+    this.updateViewTransition()
+    this.updateToasts()
+    if (this.showStats) this.updateStats()
+    if (this.showSort) this.updateSortMenu()
+    if (this.showDirManager) this.updateDirManager()
     if (this.fullLyrics) this.updateFullLyrics()
   }
 

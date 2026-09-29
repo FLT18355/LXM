@@ -1,37 +1,53 @@
-# 蓝汐音乐 (lxm-tui)
+# 蓝汐音乐 (lxm-tui) · r-1.0
 
-OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm.py` 移植而来，全新 UI
+OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm.py` 移植而来，全新 UI。
+
+## r-1.0 更新
+
+- **多音乐目录**：`music_directories` 支持任意多个目录，合并去重扫描；设置视图 → 音乐目录
+  进入管理弹层（`a` 添加 · `d` 删除 · `Enter` 设为主目录/置顶）。旧的单目录 `music_directory`
+  完全兼容，并继续作为主目录回写（Python 版可混用）。
+- **播放队列视图**（键 `5`）：查看接下来要播的顺序，`Enter` 播放 · `x` 移除 · `J/K` 上移下移 ·
+  `c` 清空待播 · `w` 把选中项移到当前曲之后。库内通用键 **`w` 下一首播放（插队）**、
+  **`e` 加入队列末尾**。
+- **列表排序**（键 `o`）：按 默认路径 / 歌名 / 时长 / 播放次数 / 格式 / 所在目录 排序，
+  支持升降序，持久化到配置；排序按路径重映射队列，当前播放与收藏/歌单不受影响。
+- **音乐库统计面板**（键 `S`）：曲目数 · 已知总时长 · 总播放次数 · 收藏/歌单/目录数 ·
+  格式分布条形图 · 播放次数 Top · 最近播放（`plays.toml` 新增 `last` 时间戳，向后兼容）。
+- **新动效**：通知浮层（右下角滑入/淡出，替代纯状态栏提示）· 正在播放卡片内**程序化频谱可视化**
+  （自研、无 cava、无外部依赖）· tab 激活指示条平滑滑动 · 视图切换列表边框扫光 ·
+  顶栏 logo 渐变流光 · 睡眠定时**渐弱 7 秒后暂停**。
 
 ## 特性
 
--  播放 / 暂停 / 上一首 / 下一首（mpv 驱动，支持全格式）
--  三种循环模式：不循环 / 列表循环 / 单曲循环
--  LRC 歌词实时滚动 + 全屏 KTV 歌词模式（`L`）
--  随机播放（shuffle）
--  中文搜索（原生 Unicode 输入框）
--  收藏：`f` 收藏当前曲，列表区四视图 tab（`1` 播放列表 / `2` 收藏 / `3` 歌单 / `4` 设置）
--  歌单管理：创建 / 重命名 / 删除歌单，进入歌单详情，选歌加入 / 移除，独立持久化为 `playlists.toml`（`3` 或 `P` 进入）
-- 设置视图（`4`）：主题（Catppuccin 四口味）· 音量· 倍速· 歌词延迟（-5~5s 步进 0.25，负=提前/正=滞后）· 睡眠定时（均自动保存/即时生效）· 音乐目录（输入路径即时重扫）· 版本（只读，源自 `src/version.ts`）
+- 播放 / 暂停 / 上一首 / 下一首（mpv 驱动，支持全格式）
+- 三种循环模式：不循环 / 列表循环 / 单曲循环
+- LRC 歌词实时滚动 + 全屏 KTV 歌词模式（`L`）
+- 随机播放（shuffle）
+- 中文搜索（原生 Unicode 输入框）
+- 收藏：`f` 收藏当前曲，列表区 tab（`1` 播放列表 / `2` 收藏 / `3` 歌单 / `4` 设置 / `5` 队列）
+- 歌单管理：创建 / 重命名 / 删除歌单，进入歌单详情，选歌加入 / 移除，独立持久化为 `playlists.toml`
+- 设置视图（`4`）：主题（Catppuccin 四口味）· 音量 · 倍速 · 歌词延迟（-5~5s 步进 0.25）·
+  睡眠定时 · 音乐目录 · 列表排序 · 缓存目录 · 版本（均自动保存 / 即时生效）
 - 断点续播：退出记住歌曲与位置，重开自动续播（状态存 `~/.cache/lxmusic/state.toml`）
   - 切歌淡入淡出（渐弱 → 渐强）
-  - 静音切换（M 或 0）· 进度条鼠标点击/拖动定位
-- 歌词延迟对齐（设置第 4 行 ←/→ 步进 0.25s，-5~5s，自动保存；歌词不同步时微调）
-- 歌曲信息弹层（`i` 查看歌名/艺术家/格式/时长/路径/播放次数/模式/音量倍速）
-- 歌曲文件编辑：`R` 重命名选中歌曲（改磁盘文件名 + 同名 `.lrc`，弹层输入）、`D` 删除选中歌曲（确认弹层，删磁盘文件）；列表/收藏/歌单视图都能用，同步更新收藏、歌单、播放次数、时长缓存、断点续播与扫描缓存
-- 行内播放次数（列表/收藏每行显示 ♪N，正在播放卡片显示"已播放 N 次"）
-- 列表右列元信息：每首歌显示**格式**（扩展名）与**时长**（秒）；歌名不带后缀，超长时行内滚动（选中/播放行）
-- `g`/`G` 跳到列表首/尾（vim 风格导航）
-- 缓存目录 `~/.cache/lxmusic/`：断点续播状态 + 音乐目录扫描缓存 + 播放次数统计 + 歌曲时长缓存
-  - `bun index.ts cache` 查看 / `bun index.ts cache --clear` 清空 · 设置视图（`4`）缓存行 Enter 清空
--  导航栏播放统计：tab 栏右端实时显示"共播放 N 次"
--  秒开界面：先渲染 UI，mpv 后台异步启动（播放请求在连接前自动等待）
--  终端尺寸自适应：窄终端下长标题/状态栏自动截断，布局随窗口伸缩
-- Catppuccin 四口味配色 + 渐变进度条（8x 分数块）+ 伪频谱等化器 + 顶栏彩虹条（居中缩窄的细条）
-- 装饰动效（30fps，独立于 100ms 主 tick；待机自动降频省电）：彩虹条渐变流动 + 播放时呼吸、进度条流光扫过、
-  正在播放卡片边框呼吸、播放行绿标呼吸、tab 切换颜色平滑过渡、全屏歌词进度条流动
+  - 静音切换（`M` / `0`）· 进度条鼠标点击 / 拖动定位
+- 歌词延迟对齐（设置第 4 行或 `,` / `;` 快捷步进 0.25s，自动保存）
+- 歌曲信息弹层（`i` 查看歌名 / 艺术家 / 格式 / 时长 / 路径 / 播放次数 / 模式 / 音量倍速）
+- 歌曲文件编辑：`R` 重命名选中歌曲（改磁盘文件名 + 同名 `.lrc`）、`D` 删除选中歌曲（确认弹层）；
+  列表 / 收藏 / 歌单视图都能用，同步更新收藏、歌单、播放次数、时长缓存、断点续播与扫描缓存
+- 行内播放次数（列表 / 收藏每行显示 ♪N，正在播放卡片显示「已播放 N 次」）
+- 列表右列元信息：每首歌显示**格式**（扩展名）与**时长**（秒）；歌名不带后缀
+- `g` / `G` 跳到列表首 / 尾（vim 风格导航）
+- 缓存目录 `~/.cache/lxmusic/`：断点续播状态 + 音乐目录扫描缓存 + 播放次数统计（含最近播放时间）+ 歌曲时长缓存
+  - `bun index.ts cache` 查看 / `bun index.ts cache --clear` 清空 · 设置视图缓存行 Enter 清空
+- 导航栏播放统计：tab 栏右端实时显示「共播放 N 次」
+- 秒开界面：先渲染 UI，mpv 后台异步启动（播放请求在连接前自动等待）
+- 终端尺寸自适应：窄终端下长标题 / 状态栏自动截断，布局随窗口伸缩
+- Catppuccin 四口味配色 + 渐变进度条（8x 分数块）+ 顶栏彩虹条
 - 精致排版：三列列表（序号 / 标题 / 格式·时长）+ 标题分隔线 + 渐变卡片下划线 + 音量块字符；
-  歌词区无内容时自动收起腾出列表空间；歌词/超长歌名行内滚动
--  鼠标点击 tab 切换视图 · 点击播放列表行直接播放
+  歌词区无内容时自动收起；超长歌名/歌词行内滚动（选中切换时从 0 平滑重启，不会闪跳）
+- 鼠标点击 tab 切换视图 · 点击播放列表行直接播放
 
 ## 运行
 
@@ -39,11 +55,11 @@ OpenTUI 版本地音乐播放器，基于 **mpv JSON IPC**。由 curses 的 `lxm
 # 需要 bun (>= 1.3.0) 和 mpv
 bun install        # 首次
 bun index.ts                       # 启动 (使用配置中的音乐目录)
-bun index.ts /path/to/music        # 指定目录
+bun index.ts /path/to/music        # 指定目录启动
 bun index.ts -v / --version        # 显示版本
-bun index.ts config                # 查看当前配置
-bun index.ts config --music-directory /path/to/music   # 设置音乐目录
-bun index.ts cache                 # 查看缓存目录 (断点续播状态 + 扫描缓存)
+bun index.ts config                # 查看音乐目录
+bun index.ts config --music-directory /path/to/music   # 追加/置顶音乐目录
+bun index.ts cache                 # 查看缓存目录
 bun index.ts cache --clear         # 清空缓存
 ```
 
@@ -60,15 +76,10 @@ bun run build:portable  # → dist-js/ (可分发目录 ~67MB, 运行时外置)
 ./dist-js/lxm.sh        # 薄壳启动器; 也可 ./dist-js/lxm-tui .
 ```
 
-两种产物都仍依赖系统 `mpv`。目标平台由 `--target` 指定 (默认 bun-linux-arm64; 其他平台改成
-`bun-linux-x64` / `bun-darwin-arm64` 等)。
+两种产物都仍依赖系统 `mpv`。目标平台由 `--target` 指定（默认 `bun-linux-arm64`）。
 
-**UPX 注意**: 单文件 `dist/lxm-tui` **不能**用 UPX 压 (会破坏尾部模块图, 启动报
-`SyntaxError: Invalid character: '\0'`)。要压缩体积就用 `build:portable` — 它把 bun
-运行时拆成独立可执行文件再 UPX, 压完仍可用。
-
-全局安装 (任意目录敲 `lxm`): `ln -s /path/to/dist-js/lxm.sh ~/.local/bin/lxm`
-(启动器会跟随软链定位 dist-js, 勿直接拷走 lxm.sh)。
+**UPX 注意**：单文件 `dist/lxm-tui` **不能**用 UPX 压（会破坏尾部模块图，启动报
+`SyntaxError: Invalid character: '\0'`）。要压缩体积就用 `build:portable`。
 
 ## 快捷键
 
@@ -77,51 +88,36 @@ bun run build:portable  # → dist-js/ (可分发目录 ~67MB, 运行时外置)
 | 空格 / Enter | 播放 / 暂停 / 播放选中 | n / p | 下一首 / 上一首 |
 | ← / → | 快退 / 快进 5 秒 | [ / ] | 快退 / 快进 10 秒 |
 | + / - | 音量增 / 减 (自动保存) | M / 0 | 静音切换 |
-| m | 循环模式切换 | z | 睡眠定时 (15/30/60/90 分钟, 到点自动暂停) |
-| 1 / 2 / 3 / 4 | 切换视图：播放列表 / 收藏 / 歌单 / 设置 | ↑↓ / jk | 选择行 |
+| m | 循环模式切换 | z | 睡眠定时 (15/30/60/90 分钟, 到点渐弱暂停) |
+| 1 / 2 / 3 / 4 / 5 | 播放列表 / 收藏 / 歌单 / 设置 / 队列 | ↑↓ / jk | 选择行 |
 | g / G | 跳到列表首 / 尾 | i | 歌曲信息弹层 |
-| R | 重命名选中歌曲 (改文件名, 同名 .lrc 一起改) | D | 删除选中歌曲 (弹确认, 删磁盘文件) |
+| R | 重命名选中歌曲 (同名 .lrc 一起改) | D | 删除选中歌曲 (弹确认, 删磁盘文件) |
 | l / L | 歌词开关 / 全屏歌词 | f | 收藏当前曲 |
 | / | 搜索 (Enter 确认, Esc 取消) | d | 重新扫描目录 |
-| + / - | 音量增 / 减（自动保存） | h | 帮助 (任意键关闭) |
-| P | 进入歌单视图 (= 3) | q / Esc | 退出 / 逐级返回 |
+| , / ; | 歌词延迟 -0.25s / +0.25s | o | 列表排序菜单 |
+| S | 音乐库统计面板 | P | 进入歌单视图 (= 3) |
+| w | 选中曲下一首播放 (插队) | e | 选中曲加入队列末尾 |
+| h | 帮助 (任意键关闭) | q / Esc | 退出 / 逐级返回 |
+| 队列视图内 | Enter / x / J / K / c / w | 播放 / 移除 / 下移 / 上移 / 清空 / 插队 |
 | 歌单视图内 | n / r / d | 新建 / 重命名 / 删除歌单 |
 | 歌单详情内 | Enter / a / x | 播放 / 加歌 / 移除 |
-| 设置视图内 | Enter 或 ←/→ | 主题=切换 · 音量=±5 · 倍速=±0.25 · 目录=弹层输入路径 · 缓存=Enter 清空 |
-
-
-## 开发
-
-架构、数据流、不变量与踩坑史见 [`doc/DEVELOPMENT.md`](doc/DEVELOPMENT.md) (面向后续 AI / 开发者, 改码前必读)。
-
-```bash
-bunx tsc --noEmit          # 类型检查
-bun run test               # 全部测试 (tests/ 下所有 *-test.ts)
-bun tests/ui-test.ts       # 无头 UI 渲染测试 (createTestRenderer)
-bun tests/theme-test.ts    # 主题切换测试
-bun tests/playlist-test.ts # 歌单功能测试 (数据隔离到临时文件)
-bun tests/regress-test.ts  # 回归测试 (end-file 切歌链防多米诺)
-bun tests/regress2-test.ts # 回归测试 (搜索/收藏模式下切歌)
-bun tests/loop-test.ts     # 回归测试 (单曲循环 loop-file)
-bun tests/cache-test.ts    # 回归测试 (缓存目录读写 / mtime 校验)
-bun tests/features-test.ts # 新功能测试 (播放次数缓存 / 睡眠定时器)
-bun tests/track-ops-test.ts # 歌曲文件操作测试 (重命名 / 删除 + 各持久化同步)
-```
+| 目录管理内 | a / d / Enter | 添加 / 删除 / 设为主目录 |
+| 设置视图内 | Enter 或 ←/→ | 主题 · 音量 · 倍速 · 歌词延迟 · 睡眠 · 目录 · 排序 · 缓存 · 版本 |
 
 ## 结构
 
 ```
-index.ts          入口: 参数 / mpv 启动 / renderer / 主循环 / 清理
-src/config.ts     配置读写 (TOML, 兼容 Python 版)
-src/cache.ts      缓存目录 ~/.cache/lxmusic/ (断点续播状态 + 扫描缓存)
-src/scanner.ts    音乐目录递归扫描 (带缓存加速)
-src/version.ts    版本号唯一来源 (index/ui 引用; 改版本只动这处)
+index.ts          入口: 参数 / 多目录扫描 / mpv 启动 / renderer / 主循环 / 清理
+src/config.ts     配置读写 (TOML, 兼容 Python 版) + 多音乐目录解析
+src/cache.ts      缓存目录 ~/.cache/lxmusic/ (断点续播 / 扫描缓存 / 播放次数+最近时间 / 时长)
+src/scanner.ts    音乐目录递归扫描 (单目录 + 多目录合并去重, 带缓存)
+src/version.ts    版本号唯一来源 (改版本只动这处; package.json 手动同步)
 src/duration.ts   后台批量探测歌曲时长 (列表右侧显示)
 src/lrc.ts        LRC 歌词解析
 src/mpv.ts        mpv JSON IPC 客户端 (Bun unix socket, 事件驱动)
-src/player.ts     播放器状态与逻辑
+src/player.ts     播放器状态与逻辑 (队列操作 / 排序 / 睡眠定时 / 收藏 / 歌单)
 src/playlists.ts  歌单持久化 (TOML 子表数组)
-src/theme.ts      Catppuccin 四口味主题 (Latte/Frappé/Macchiato/Mocha)
-src/ui.ts         OpenTUI 界面 (四视图 tab: 列表/收藏/歌单/设置, 设置内切换主题)
-tests/            无头测试 (ui / theme / playlist / regress / regress2 / loop / cache / features / track-ops)
+src/stats.ts      音乐库统计 (统计面板数据来源)
+src/theme.ts      Catppuccin 四口味主题 (Latte / Frappé / Macchiato / Mocha)
+src/ui.ts         OpenTUI 界面 (五视图 tab + 弹层 + 装饰动效)
 ```
