@@ -26,7 +26,7 @@ const HELP = `
 版本: ${VERSION}
 
 用法:
-  bun index.ts [音乐目录]                        启动播放器 (可多目录, 在 ${"\uF013"} 设置里管理)
+  bun index.ts [音乐目录]                        启动播放器 (可多目录, 在 设置 里管理)
   bun index.ts config [--music-directory DIR]   配置/查看音乐目录
   bun index.ts cache [--clear]                  查看/清空缓存目录
   bun index.ts -v | --version                   显示版本
@@ -41,7 +41,8 @@ const HELP = `
   R 重命名歌曲   D 删除歌曲 (改/删磁盘文件, 删除需确认)
   l/L 歌词开关/全屏歌词 (KTV)     d 重新扫描目录
   g/G 列表首/尾   i 歌曲信息       z 睡眠定时 (到点渐弱暂停)
-  1/2/3/4/5 切换视图: 列表/收藏/歌单/设置/队列   h 帮助 q/Esc 退出
+  PgUp/PgDn 翻页  1/2/3/4/5 切换视图: 列表/收藏/歌单/设置/队列
+  h 帮助                          q 退出   Esc 逐级返回
   M/0  静音
 `
 
@@ -250,6 +251,7 @@ async function main() {
   const savedVol = Number(cfg["volume"])
   if (Number.isFinite(savedVol) && savedVol >= 0 && savedVol <= 150) player.volume = savedVol
   const savedSpeed = Number(cfg["speed"])
+  if (Number.isFinite(savedSpeed) && savedSpeed >= 0.25 && savedSpeed <= 4) player.speed = savedSpeed
   const savedDelay = Number(cfg["lyric_delay"])
   if (Number.isFinite(savedDelay) && savedDelay >= -5 && savedDelay <= 5) player.lyricDelay = savedDelay
 
@@ -287,6 +289,7 @@ async function main() {
       return
     }
     player.mpvReady = true
+    if (player.speed !== 1) void player.setSpeed(player.speed)
     ui.updateNowPlaying()
     // ---------- 恢复断点续播 (mpv 就绪后) ----------
     // 优先读缓存 state.toml; 兼容旧版 config.toml 的 last_path/last_pos (一次性迁移到缓存)
@@ -300,8 +303,10 @@ async function main() {
       if (idx !== -1) {
         player.idx = idx
         player.currentPath = lastPath
-        await player.playIndex(idx)
+        // 先挂起定位再 loadfile: time-pos 首帧可能早于 await 返回,
+        // 原来先 playIndex 再赋值会丢掉续播位置
         if (lastPos > 0) player.pendingSeek = lastPos
+        await player.playIndex(idx, { count: false })
       }
     }
     // 迁移: 把旧 config 里的 last_path/last_pos 清掉 (它们已属于缓存)

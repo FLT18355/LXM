@@ -154,7 +154,7 @@ export class Player {
 
   // ---------- 播放控制 ----------
 
-  async playIndex(i: number): Promise<void> {
+  async playIndex(i: number, opts?: { count?: boolean }): Promise<void> {
     if (!this.playlist.length) return
     // 延迟启动: mpv 未就绪时播放请求直接跳过 (UI 已显示但还不能播)
     if (!this.mpvReady) return
@@ -163,10 +163,14 @@ export class Player {
     this.idx = ((i % this.playlist.length) + this.playlist.length) % this.playlist.length
     const path = this.playlist[this.idx]
     this.currentPath = path
-    // 播放计数: 每次发起播放 +1
-    this.playCount = bumpPlay(path)
-    this.playCounts.set(path, this.playCount)
-    this.totalPlayCount++
+    // 播放计数: 每次发起播放 +1 (恢复断点续播时用 count:false)
+    if (opts?.count === false) {
+      this.playCount = this.playCountOf(path)
+    } else {
+      this.playCount = bumpPlay(path)
+      this.playCounts.set(path, this.playCount)
+      this.totalPlayCount++
+    }
     // 切歌中: 旧文件会触发 end-file(stop), 先抑制, 等新文件加载完成(file-loaded)再恢复
     this.suppressEndFile = true
     if (this.suppressTimer) clearTimeout(this.suppressTimer)
@@ -246,7 +250,16 @@ export class Player {
       await this.playIndex(this.idx)
       return
     }
+    const before = this.idx
     await this.advance(1)
+    // repeat OFF 且已在队列末尾: advance 不会换曲, 但 mpv 已停止 → 同步状态
+    if (this.repeat === "OFF" && this.idx === before && !this.paused) {
+      const pos = this.queue.indexOf(this.idx)
+      if (pos === -1 || pos === this.queue.length - 1) {
+        this.playing = false
+        this.timePos = this.duration
+      }
+    }
   }
 
   // ---------- 模式切换 ----------
@@ -317,18 +330,12 @@ export class Player {
   }
 
   /**
-   * 清空待播队列: 正在播放时只保留当前曲; 否则恢复完整库顺序。
+   * 清空待播队列: 只保留当前曲 (当前曲不在队列时则清空)。
+   * 「清空」不应该偷偷把整库塞回队列, 那会让用户以为操作没生效。
    * 返回清空后的队列长度。
    */
   queueClear(): number {
-    if (this.queue.includes(this.idx)) {
-      this.queue = [this.idx]
-    } else if (this.playlist.length) {
-      this.queue = Array.from({ length: this.playlist.length }, (_, i) => i)
-      this.idx = 0
-    } else {
-      this.queue = []
-    }
+    this.queue = this.queue.includes(this.idx) ? [this.idx] : []
     return this.queue.length
   }
 
